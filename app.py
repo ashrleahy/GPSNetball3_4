@@ -5,25 +5,16 @@ import streamlit.components.v1 as components
 import os, json
 
 # --- 1. CONFIG & STYLING ---
-st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide", initial_sidebar_state="collapsed")
+st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
 
 st.markdown("""
     <style>
-    /* Force light theme everywhere */
-    html, body { background-color: #ffffff !important; color: #222222 !important; }
-    [data-testid="stAppViewContainer"] { background-color: #ffffff !important; }
-    [data-testid="stMain"] { background-color: #ffffff !important; }
-    [data-testid="stHeader"] { background-color: #ffffff !important; }
-    .stApp { background-color: #ffffff !important; }
-    /* Layout */
     .block-container { padding: 0.3rem !important; max-width: 480px !important; margin: auto !important; }
     header, footer { visibility: hidden; }
     section[data-testid="stSidebar"] { display: none; }
-    /* Table */
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
     td { border: 1px solid #ddd; height: 38px; padding: 0; }
-    /* Header banner */
     .app-header {
         text-align: center;
         background: linear-gradient(135deg, #1a5276, #2e86c1);
@@ -31,43 +22,8 @@ st.markdown("""
         padding: 14px 8px 10px 8px;
         margin-bottom: 10px;
     }
-    .app-header h2 {
-        margin: 0 0 3px 0;
-        font-size: 18px;
-        font-weight: 900;
-        color: #ffffff !important;
-        letter-spacing: 0.3px;
-    }
-    .app-header p {
-        margin: 0;
-        font-size: 11px;
-        color: #aed6f1 !important;
-        letter-spacing: 1.5px;
-        text-transform: uppercase;
-    }
-    /* Force light on all text elements */
-    p, h1, h2, h3, label, .stMarkdown { color: #222222 !important; }
-    /* Tabs */
-    [data-testid="stTabs"] { background-color: #ffffff !important; }
-    [data-testid="stTabsContent"] { background-color: #ffffff !important; }
-    button[data-baseweb="tab"] { background-color: #ffffff !important; color: #222222 !important; }
-    button[data-baseweb="tab"][aria-selected="true"] { color: #2e86c1 !important; }
-    /* Slider */
-    [data-testid="stSlider"] label, [data-testid="stSlider"] p { color: #222222 !important; }
-    [data-testid="stSlider"] div { color: #222222 !important; }
-    /* Data editor / dataframe */
-    [data-testid="stDataFrame"], [data-testid="stDataEditor"] { background-color: #ffffff !important; }
-    .dvn-scroller { background-color: #ffffff !important; }
-    /* Charts */
-    [data-testid="stVegaLiteChart"] { background-color: #ffffff !important; }
-    .element-container { background-color: #ffffff !important; }
-    /* Any remaining dark backgrounds */
-    div[class*="css"] { background-color: transparent !important; }
-    [data-testid="block-container"] { background-color: #ffffff !important; }
-    /* Markdown text */
-    .stMarkdown p, .stMarkdown span { color: #222222 !important; }
-    /* Bold date text */
-    strong { color: #222222 !important; }
+    .app-header h2 { margin: 0 0 3px 0; font-size: 18px; font-weight: 900; color: #ffffff; }
+    .app-header p  { margin: 0; font-size: 11px; color: #aed6f1; letter-spacing: 1.5px; text-transform: uppercase; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -91,7 +47,7 @@ def load_availability():
     return None
 
 # --- 3. CONFIG ---
-all_players = ["Abbie", "Zara", "Judy", "Alexandra", "Kim", "Klara", "Saga", "Audrey"]
+all_players = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
 positions   = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
 all_slots   = positions + ["Off"]
 
