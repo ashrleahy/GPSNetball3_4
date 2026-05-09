@@ -47,6 +47,27 @@ st.markdown("""
     }
     /* Force light on all text elements */
     p, h1, h2, h3, label, .stMarkdown { color: #222222 !important; }
+    /* Tabs */
+    [data-testid="stTabs"] { background-color: #ffffff !important; }
+    [data-testid="stTabsContent"] { background-color: #ffffff !important; }
+    button[data-baseweb="tab"] { background-color: #ffffff !important; color: #222222 !important; }
+    button[data-baseweb="tab"][aria-selected="true"] { color: #2e86c1 !important; }
+    /* Slider */
+    [data-testid="stSlider"] label, [data-testid="stSlider"] p { color: #222222 !important; }
+    [data-testid="stSlider"] div { color: #222222 !important; }
+    /* Data editor / dataframe */
+    [data-testid="stDataFrame"], [data-testid="stDataEditor"] { background-color: #ffffff !important; }
+    .dvn-scroller { background-color: #ffffff !important; }
+    /* Charts */
+    [data-testid="stVegaLiteChart"] { background-color: #ffffff !important; }
+    .element-container { background-color: #ffffff !important; }
+    /* Any remaining dark backgrounds */
+    div[class*="css"] { background-color: transparent !important; }
+    [data-testid="block-container"] { background-color: #ffffff !important; }
+    /* Markdown text */
+    .stMarkdown p, .stMarkdown span { color: #222222 !important; }
+    /* Bold date text */
+    strong { color: #222222 !important; }
     </style>
 """, unsafe_allow_html=True)
 
