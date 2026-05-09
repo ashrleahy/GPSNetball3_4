@@ -2,29 +2,26 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
 import streamlit.components.v1 as components
-import os, io, json
+import os, json
 
-# --- 1. SYSTEM CONFIG & MOBILE STYLING ---
+# --- 1. CONFIG & STYLING ---
 st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
 
 st.markdown("""
     <style>
     .block-container { padding: 0.3rem !important; max-width: 480px !important; margin: auto !important; }
     header, footer { visibility: hidden; }
-    .stHeading, .stMarkdown { text-align: center; }
+    section[data-testid="stSidebar"] { display: none; }
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
     td { border: 1px solid #ddd; height: 38px; padding: 0; }
-    .player-cell {
-        font-size: 10px; font-weight: bold; padding-left: 4px; background: #fff;
-        white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
-    }
+    .app-header { text-align: center; padding: 6px 0 2px 0; }
+    .app-header h2 { margin: 0; font-size: 16px; color: #222; }
+    .app-header p  { margin: 0; font-size: 11px; color: #666; }
     </style>
 """, unsafe_allow_html=True)
 
 # --- 2. PERSISTENCE ---
-# On Fly.io, mount a volume at /data in fly.toml — data survives restarts/redeploys.
-# Locally, falls back to the script's own directory.
 DATA_DIR   = "/data" if os.path.isdir("/data") else os.path.dirname(os.path.abspath(__file__))
 SCHED_FILE = os.path.join(DATA_DIR, "schedule.csv")
 AVAIL_FILE = os.path.join(DATA_DIR, "availability.csv")
@@ -68,11 +65,6 @@ def season_dates():
 
 # --- 4. ROTATION ALGORITHM ---
 def run_auto_allocation(force=False):
-    """
-    Priority 1: No player sits off more than 1 quarter per game.
-    Priority 2: Continuity bias (same pos Q1->Q2, Q3->Q4; region switch Q2->Q3)
-                balanced against season equity across positions.
-    """
     dates = season_dates()
 
     if 'master_schedule' not in st.session_state or st.session_state.master_schedule.empty:
@@ -116,7 +108,6 @@ def run_auto_allocation(force=False):
         for q_idx in range(4):
             base_idx = (w - 1) * 4 + q_idx
 
-            # Skip already-allocated quarters unless forcing
             if not force and pd.notna(df.at[base_idx, 'GS']):
                 for pos in positions:
                     p = df.at[base_idx, pos]
@@ -128,7 +119,6 @@ def run_auto_allocation(force=False):
                     sat_off_this_game.add(off_p)
                 continue
 
-            # Who sits off this quarter?
             if n_off_per_q > 0:
                 eligible = [p for p in today_players if p not in sat_off_this_game] or today_players
                 off_now  = sorted(eligible, key=lambda p: off_counts[p])[:n_off_per_q]
@@ -142,7 +132,6 @@ def run_auto_allocation(force=False):
             df.at[base_idx, 'Off'] = off_now[0] if off_now else "N/A"
             on_now = [p for p in today_players if p not in off_now]
 
-            # Previous quarter positions for continuity scoring
             prev_pos = {}
             if q_idx > 0:
                 prev_idx = base_idx - 1
@@ -155,12 +144,12 @@ def run_auto_allocation(force=False):
                 s = pos_counts[p][pos] * EQUITY_WEIGHT
                 if p in prev_pos:
                     last = prev_pos[p]
-                    if q_idx in [1, 3]:        # Q2/Q4 — reward staying in same pos/region
+                    if q_idx in [1, 3]:
                         if last == pos:
                             s -= CONT_WEIGHT
                         elif regs.get(last) == regs.get(pos):
                             s -= REG_WEIGHT
-                    elif q_idx == 2:            # Q3 — reward region change at half time
+                    elif q_idx == 2:
                         if regs.get(last) == regs.get(pos):
                             s += CHANGE_WEIGHT
                 return s
@@ -217,21 +206,28 @@ if 'round_selection' not in st.session_state:
     st.session_state.round_selection = get_default_week(date_list)
 
 
-# --- 7. PAGES ---
-with st.sidebar:
-    st.title("🏐 Netball Pro")
-    page = st.radio("Menu", ["Rotation", "Availability", "Stats"])
-    if st.button("🚨 Reset Rotation"):
+# --- 7. HEADER ---
+st.markdown("""
+    <div class="app-header">
+        <h2>🏐 Goodwood Primary School Yr3/4 Jets</h2>
+        <p>Netball Rotation Planner</p>
+    </div>
+""", unsafe_allow_html=True)
+
+# --- 8. PAGES (tabs) ---
+tab1, tab2, tab3 = st.tabs(["📋 Rotation", "✅ Availability", "📊 Stats"])
+
+# TAB 1: ROTATION
+with tab1:
+    rd = st.session_state.get('round_selection', 1)
+    st.markdown(f"**{st.session_state.availability.index[rd-1]}**")
+    st.slider("Match Week", 1, len(st.session_state.availability.index),
+              key="round_selection", label_visibility="collapsed")
+
+    if st.button("🚨 Reset Rotation", key="reset"):
         run_auto_allocation(force=True)
         save_data()
         st.rerun()
-
-# PAGE 1: ROTATION
-if page == "Rotation":
-    rd = st.session_state.get('round_selection', 1)
-    st.markdown(f"### {st.session_state.availability.index[rd-1]}")
-    st.slider("Match Week", 1, len(st.session_state.availability.index),
-              key="round_selection", label_visibility="collapsed")
 
     view_df     = st.session_state.master_schedule[st.session_state.master_schedule['Week'] == rd].copy()
     matrix_data = []
@@ -246,10 +242,9 @@ if page == "Rotation":
     html_grid = f"""
     <div id="grid-root"></div>
     <script>
-    const players = {json.dumps(all_players)};
-    const slots   = {json.dumps(all_slots)};
-    const colors  = {json.dumps(pos_colors)};
-    let matrix    = {json.dumps(matrix_data)};
+    const slots  = {json.dumps(all_slots)};
+    const colors = {json.dumps(pos_colors)};
+    let matrix   = {json.dumps(matrix_data)};
 
     function render() {{
         let h = `<table style="width:100%;border-collapse:collapse;font-family:sans-serif;table-layout:fixed;">
@@ -301,8 +296,8 @@ if page == "Rotation":
         save_data()
         st.rerun()
 
-# PAGE 2: AVAILABILITY
-elif page == "Availability":
+# TAB 2: AVAILABILITY
+with tab2:
     st.markdown("### Availability Planner")
     u = st.data_editor(st.session_state.availability, use_container_width=True)
     if st.button("Apply & Re-Balance"):
@@ -311,8 +306,8 @@ elif page == "Availability":
         save_data()
         st.rerun()
 
-# PAGE 3: STATS
-else:
+# TAB 3: STATS
+with tab3:
     st.markdown("### Season Statistics")
     melted = st.session_state.master_schedule.melt(id_vars=['Week'], value_vars=positions, value_name='Player')
     st.bar_chart(melted['Player'].value_counts())
