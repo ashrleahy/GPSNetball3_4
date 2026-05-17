@@ -414,6 +414,16 @@ if page == "Rotation":
     st.markdown("<hr style='margin:2px 0'>", unsafe_allow_html=True)
 
     # One row per player
+    # KEY FIX: Before rendering any selectbox, force its session_state key to
+    # match the dataframe value. This prevents Streamlit from restoring a
+    # stale widget value after st.rerun(), which caused the revert bug.
+    for p in all_players:
+        for q_idx in range(4):
+            q_row = view_df.iloc[q_idx]
+            current_pos = next((c for c in all_slots if q_row[c] == p), "Off")
+            widget_key = f"sel_{rd}_{p}_{q_idx}"
+            st.session_state[widget_key] = current_pos  # always sync from dataframe
+
     for p in all_players:
         row_cols = st.columns([2, 1, 1, 1, 1])
         row_cols[0].markdown(
@@ -424,12 +434,12 @@ if page == "Rotation":
             q_row = view_df.iloc[q_idx]
             current_pos = next((c for c in all_slots if q_row[c] == p), "Off")
             color = pos_colors.get(current_pos, "#F5F5F5")
+            widget_key = f"sel_{rd}_{p}_{q_idx}"
 
             new_pos = row_cols[q_idx + 1].selectbox(
                 label=f"{p}_Q{q_idx+1}",
                 options=all_slots,
-                index=all_slots.index(current_pos),
-                key=f"sel_{rd}_{p}_{q_idx}",
+                key=widget_key,
                 label_visibility="collapsed"
             )
 
