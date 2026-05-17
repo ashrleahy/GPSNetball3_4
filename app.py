@@ -159,18 +159,22 @@ def api_save():
         schedule = get_schedule()
         avail    = file_read(AVAIL_FILE) or default_avail()
 
-        # Apply matrix to schedule
+        # Apply matrix to THIS week only — never touch past weeks
         for qi in range(4):
             m_idx = (save_week - 1) * 4 + qi
             for s in ALL_SLOTS:
                 schedule[m_idx][s] = None
             for row in matrix:
-                schedule[m_idx][row["Qs"][qi]] = row["name"]
+                pos = row["Qs"][qi]
+                if pos in ALL_SLOTS:
+                    schedule[m_idx][pos] = row["name"]
 
-        # Rebalance future weeks
+        # Rebalance FUTURE weeks only (save_week+1 onward)
+        # Past weeks (1..save_week-1) are never touched
         next_week = save_week + 1
         if next_week <= len(DATES):
-            pc, oc   = build_counts(schedule, next_week, 0)
+            # Count everything up to end of save_week as the equity baseline
+            pc, oc = build_counts(schedule, next_week, 0)
             schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
 
         file_write(SCHED_FILE, schedule)
@@ -315,31 +319,11 @@ function renderRotation() {
             <input type="range" min="1" max="${DATES.length}" value="${currentWeek}"
                    oninput="changeWeek(parseInt(this.value))"/>
         </div>
-        <table>
-            <thead><tr>
-                <th style="width:18%">NAME</th>
-                <th style="width:20.5%">Q1</th>
-                <th style="width:20.5%">Q2</th>
-                <th style="width:20.5%">Q3</th>
-                <th style="width:20.5%">Q4</th>
-            </tr></thead><tbody>`;
-    matrix.forEach((row, pIdx) => {
-        html += `<tr><td class="name-cell">${row.name}</td>`;
-        row.Qs.forEach((pos, qIdx) => {
-            const bg   = POS_COLORS[pos] || '#F5F5F5';
-            const opts = ALL_SLOTS.map(s =>
-                `<option value="${s}" ${s===pos?'selected':''}>${s}</option>`
-            ).join('');
-            html += `<td style="background:${bg}">
-                <select onchange="onEdit(${pIdx},${qIdx},this.value)">${opts}</select>
-            </td>`;
-        });
-        html += '</tr>';
-    });
-    html += `</tbody></table>
+        <div id="grid-table"></div>
         <button class="save-btn" id="save-btn" onclick="saveChanges()">💾 Save &amp; Rebalance</button>
         <div class="status" id="status"></div>`;
     document.getElementById('page-rotation').innerHTML = html;
+    renderTable();
 }
 
 function changeWeek(w) {
@@ -354,16 +338,40 @@ function changeWeek(w) {
 function onEdit(pIdx, qIdx, newPos) {
     const oldPos = matrix[pIdx].Qs[qIdx];
     if (oldPos === newPos) return;
+    // Swap with whoever has newPos in this quarter
     const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === newPos);
     if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
     matrix[pIdx].Qs[qIdx] = newPos;
-    // Update cell background
-    const cells = document.querySelectorAll('td select');
-    cells.forEach(sel => {
-        sel.parentElement.style.background = POS_COLORS[sel.value] || '#F5F5F5';
-    });
     dirty = true;
-    document.getElementById('status').textContent = '● Unsaved changes';
+    // Re-render entire table so all dropdowns and colours are consistent
+    renderTable();
+}
+
+function renderTable() {
+    let html = `<table>
+        <thead><tr>
+            <th style="width:18%">NAME</th>
+            <th style="width:20.5%">Q1</th>
+            <th style="width:20.5%">Q2</th>
+            <th style="width:20.5%">Q3</th>
+            <th style="width:20.5%">Q4</th>
+        </tr></thead><tbody>`;
+    matrix.forEach((row, pIdx) => {
+        html += `<tr><td class="name-cell">${row.name}</td>`;
+        row.Qs.forEach((pos, qIdx) => {
+            const bg   = POS_COLORS[pos] || '#F5F5F5';
+            const opts = ALL_SLOTS.map(s =>
+                `<option value="${s}" ${s===pos?'selected':''}>${s}</option>`
+            ).join('');
+            html += `<td style="background:${bg}">
+                <select onchange="onEdit(${pIdx},${qIdx},this.value)">${opts}</select>
+            </td>`;
+        });
+        html += '</tr>';
+    });
+    html += '</tbody></table>';
+    document.getElementById('grid-table').innerHTML = html;
+    document.getElementById('status').textContent = dirty ? '● Unsaved changes' : '';
 }
 
 async function saveChanges() {
