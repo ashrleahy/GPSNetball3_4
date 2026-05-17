@@ -1,6 +1,7 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
+import streamlit.components.v1 as components
 import os, json
 
 st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
@@ -12,7 +13,9 @@ st.markdown("""
     #MainMenu { visibility: hidden; }
     header, footer { visibility: hidden; }
     .block-container { padding: 0.3rem !important; max-width: 480px !important; margin: auto !important; }
-    div[data-testid="stHorizontalBlock"] { gap: 4px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
+    td { border: 1px solid #ddd; height: 38px; padding: 0; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -191,82 +194,138 @@ if page == "Rotation":
 
     week_rows = [r for r in schedule if r["week"] == w]
 
-    # Build a selectbox grid using native Streamlit — same visual layout, no JS needed
-    # Header row
-    cols = st.columns([1.8, 1, 1, 1, 1])
-    cols[0].markdown("<div style='font-size:10px;color:#444;padding:4px;background:#f8f9fa;border:1px solid #ddd;text-align:center'>NAME</div>", unsafe_allow_html=True)
-    for qi, lbl in enumerate(["Q1","Q2","Q3","Q4"]):
-        cols[qi+1].markdown(f"<div style='font-size:10px;color:#444;padding:4px;background:#f8f9fa;border:1px solid #ddd;text-align:center'>{lbl}</div>", unsafe_allow_html=True)
-
-    # Track edits in session state
-    if "edits" not in st.session_state:
-        st.session_state.edits = {}
-
-    edit_key = f"w{w}"
-
-    # Player rows
+    # Build matrix for the grid
+    matrix_data = []
     for p in ALL_PLAYERS:
-        cols = st.columns([1.8, 1, 1, 1, 1])
-        cols[0].markdown(f"<div style='font-size:10px;font-weight:bold;padding:4px;border:1px solid #ddd;height:38px;display:flex;align-items:center;background:#fff'>{p}</div>", unsafe_allow_html=True)
+        row = {"name": p, "Qs": []}
         for qi in range(4):
-            qrow = week_rows[qi]
-            current_pos = next((c for c in ALL_SLOTS if qrow.get(c) == p), "Off")
-            # Check if there's a pending edit for this cell
-            cell_key = f"{edit_key}_p{ALL_PLAYERS.index(p)}_q{qi}"
-            default_idx = ALL_SLOTS.index(st.session_state.edits.get(cell_key, current_pos))
-            bg = POS_COLORS.get(st.session_state.edits.get(cell_key, current_pos), "#F5F5F5")
-            with cols[qi+1]:
-                chosen = st.selectbox(
-                    label=cell_key,
-                    options=ALL_SLOTS,
-                    index=default_idx,
-                    key=cell_key,
-                    label_visibility="collapsed"
-                )
-                st.session_state.edits[cell_key] = chosen
+            pos = next((c for c in ALL_SLOTS if week_rows[qi].get(c) == p), "Off")
+            row["Qs"].append(pos)
+        matrix_data.append(row)
 
-    # Save button
-    st.markdown("---")
-    col_save, col_disc = st.columns(2)
-    with col_save:
-        if st.button("💾 Save Changes", use_container_width=True, type="primary"):
-            # Apply all edits for this week
-            for p in ALL_PLAYERS:
-                p_idx = ALL_PLAYERS.index(p)
-                for qi in range(4):
-                    cell_key = f"{edit_key}_p{p_idx}_q{qi}"
-                    new_pos = st.session_state.edits.get(cell_key)
-                    if not new_pos:
-                        continue
-                    m_idx = (w - 1) * 4 + qi
-                    old_pos = next((c for c in ALL_SLOTS if schedule[m_idx].get(c) == p), None)
-                    if old_pos == new_pos:
-                        continue
-                    # Swap
-                    displaced = schedule[m_idx].get(new_pos)
-                    schedule[m_idx][new_pos] = p
-                    if old_pos:
-                        schedule[m_idx][old_pos] = displaced
+    # Pending edits stored as list of {pIdx, qIdx, newPos} — applied on Save
+    if f"pending_{w}" not in st.session_state:
+        st.session_state[f"pending_{w}"] = []
 
-            # Rebalance from next week
-            next_week = w + 1
+    # The grid: identical HTML/JS to original, but send() stores edits locally
+    # and updates a hidden textarea instead of redirecting
+    html_grid = f"""
+    <style>
+    table {{ width:100%; border-collapse:collapse; font-family:sans-serif; table-layout:fixed; }}
+    th {{ font-size:10px; color:#444; padding:4px; border:1px solid #ddd; background:#f8f9fa; }}
+    td {{ border:1px solid #ddd; height:38px; padding:0; }}
+    select {{ width:100%; height:100%; border:none; background:transparent; font-size:10px;
+              font-weight:bold; text-align:center; appearance:none; cursor:pointer; }}
+    #save-btn {{ margin-top:8px; width:100%; padding:8px; background:#ff4b4b; color:white;
+                 border:none; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer; }}
+    #save-btn:hover {{ background:#cc0000; }}
+    #status {{ font-size:11px; color:#666; margin-top:4px; text-align:center; }}
+    </style>
+
+    <div id="grid-root"></div>
+    <button id="save-btn" onclick="saveChanges()">💾 Save Changes</button>
+    <div id="status"></div>
+
+    <script>
+    const slots   = {json.dumps(ALL_SLOTS)};
+    const colors  = {json.dumps(POS_COLORS)};
+    const players = {json.dumps(ALL_PLAYERS)};
+    const week    = {w};
+    let matrix    = {json.dumps(matrix_data)};
+    let pending   = [];
+
+    function render() {{
+        let h = `<table>
+            <thead><tr>
+                <th style="width:18%">NAME</th>
+                <th style="width:20.5%">Q1</th>
+                <th style="width:20.5%">Q2</th>
+                <th style="width:20.5%">Q3</th>
+                <th style="width:20.5%">Q4</th>
+            </tr></thead><tbody>`;
+        matrix.forEach((row, pIdx) => {{
+            h += `<tr>
+                <td style="font-size:10px;font-weight:bold;padding-left:3px;background:#fff;
+                           overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
+                    ${{row.name}}</td>`;
+            row.Qs.forEach((pos, qIdx) => {{
+                const bg   = colors[pos] || '#F5F5F5';
+                const opts = slots.map(s =>
+                    `<option value="${{s}}" ${{s===pos?'selected':''}}>${{s}}</option>`
+                ).join('');
+                h += `<td style="background:${{bg}}">
+                    <select onchange="onEdit(${{pIdx}},${{qIdx}},this.value)">${{opts}}</select>
+                </td>`;
+            }});
+            h += `</tr>`;
+        }});
+        h += `</tbody></table>`;
+        document.getElementById('grid-root').innerHTML = h;
+        document.getElementById('status').textContent =
+            pending.length > 0 ? `${{pending.length}} unsaved change(s)` : '';
+    }}
+
+    function onEdit(pIdx, qIdx, newPos) {{
+        const oldPos = matrix[pIdx].Qs[qIdx];
+        if (oldPos === newPos) return;
+        // Swap with whoever has newPos
+        const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === newPos);
+        if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
+        matrix[pIdx].Qs[qIdx] = newPos;
+        // Track pending
+        pending.push({{pIdx, qIdx, newPos, oldPos}});
+        render();
+    }}
+
+    function saveChanges() {{
+        if (pending.length === 0) return;
+        document.getElementById('save-btn').textContent = 'Saving...';
+        document.getElementById('save-btn').disabled = true;
+
+        // Build full matrix state to send
+        const payload = matrix.map(row => ({{name: row.name, Qs: row.Qs}}));
+
+        // Send to Streamlit via query param with full grid state
+        const data = encodeURIComponent(JSON.stringify({{week: week, matrix: payload}}));
+        const url  = new URL(window.parent.location.href);
+        url.searchParams.set('save', data);
+        window.parent.location.href = url.toString();
+    }}
+
+    render();
+    </script>
+    """
+    components.html(html_grid, height=420)
+
+    # Handle save from query param
+    qp = st.query_params
+    if "save" in qp:
+        try:
+            payload   = json.loads(qp["save"])
+            save_week = payload["week"]
+            matrix    = payload["matrix"]
+
+            # Write matrix back to schedule
+            for qi in range(4):
+                m_idx = (save_week - 1) * 4 + qi
+                for s in ALL_SLOTS:
+                    schedule[m_idx][s] = None
+                for row in matrix:
+                    pos = row["Qs"][qi]
+                    schedule[m_idx][pos] = row["name"]
+
+            # Rebalance future weeks
+            next_week = save_week + 1
             if next_week <= len(DATES):
-                pc, oc = build_counts(schedule, next_week, 0)
+                pc, oc   = build_counts(schedule, next_week, 0)
                 schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
 
             file_write(SCHED_FILE, schedule)
-            # Clear edits for this week
-            for key in list(st.session_state.edits.keys()):
-                if key.startswith(edit_key):
-                    del st.session_state.edits[key]
-            st.success("Saved!")
-            st.rerun()
-    with col_disc:
-        if st.button("↩ Discard", use_container_width=True):
-            for key in list(st.session_state.edits.keys()):
-                if key.startswith(edit_key):
-                    del st.session_state.edits[key]
-            st.rerun()
+            st.session_state.week = save_week
+        except Exception as e:
+            st.error(f"Save failed: {e}")
+        st.query_params.clear()
+        st.rerun()
 
 # ── Availability ───────────────────────────────────────────────────────────────
 elif page == "Availability":
