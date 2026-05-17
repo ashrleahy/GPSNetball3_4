@@ -1,3 +1,5 @@
+Copy
+
 FROM python:3.11-slim
  
 WORKDIR /app
@@ -5,8 +7,7 @@ WORKDIR /app
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
  
-COPY app.py .
-COPY .streamlit .streamlit
+COPY . .
  
 RUN mkdir -p /data
  
@@ -18,3 +19,4 @@ CMD ["streamlit", "run", "app.py", \
      "--server.headless=true", \
      "--server.enableCORS=false", \
      "--server.enableXsrfProtection=false"]
+ 
