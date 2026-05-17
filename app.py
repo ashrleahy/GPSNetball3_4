@@ -49,7 +49,6 @@ st.markdown("""
 
 FOLDER_ID = '1Hm9wBzP9XvTcz2i4t7Nz60TXRm-pEGee'
 FILE_NAME = "netball_rotation_backup.csv"
-LOCAL_BACKUP = "/data/netball_rotation_backup.csv"   # Fly.io persistent volume
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 all_players = ["Abbie", "Zara", "Judy", "Alexandra", "Kim", "Klara", "Saga", "Audrey"]
@@ -88,22 +87,11 @@ def get_file_id(service):
     files = res.get('files', [])
     return files[0]['id'] if files else None
 
-def save_local(df):
-    """Save to Fly.io persistent volume if available, else working dir."""
-    for path in [LOCAL_BACKUP, "netball_rotation_backup.csv"]:
-        try:
-            os.makedirs(os.path.dirname(path), exist_ok=True) if os.path.dirname(path) else None
-            df.to_csv(path, index=False)
-            return
-        except Exception:
-            continue
-
 def update_drive():
-    """Always save locally first, then try Drive."""
-    save_local(st.session_state.master_schedule)
+    """Save to Drive. Shows clear success/failure toast."""
     service = get_drive_service()
     if not service:
-        st.toast("💾 Saved locally")
+        st.toast("⚠️ Drive unavailable — creds.json not found")
         return
     try:
         csv_bytes = st.session_state.master_schedule.to_csv(index=False).encode('utf-8')
@@ -116,30 +104,21 @@ def update_drive():
             service.files().create(body=meta, media_body=media, fields='id').execute()
         st.toast("✅ Saved to Drive")
     except Exception as e:
-        st.toast(f"⚠️ Drive failed, saved locally")
+        st.toast(f"❌ Drive save failed: {e}")
 
-def load_saved():
-    """Try local volume first, then Drive."""
-    for path in [LOCAL_BACKUP, "netball_rotation_backup.csv"]:
-        if os.path.exists(path):
-            try:
-                df = pd.read_csv(path)
-                if '04 May 2026' not in df['Date'].values:
-                    return df
-            except Exception:
-                pass
+def load_from_drive():
     try:
         service = get_drive_service()
-        if service:
-            file_id = get_file_id(service)
-            if file_id:
-                data = service.files().get_media(fileId=file_id).execute()
-                df = pd.read_csv(io.BytesIO(data))
-                if '04 May 2026' not in df['Date'].values:
-                    return df
-    except Exception:
-        pass
-    return None
+        if not service:
+            return None
+        file_id = get_file_id(service)
+        if not file_id:
+            return None
+        data = service.files().get_media(fileId=file_id).execute()
+        return pd.read_csv(io.BytesIO(data))
+    except Exception as e:
+        st.warning("Could not load from Drive: " + str(e))
+        return None
 
 
 # --- 3. DATE HELPERS ---
@@ -375,7 +354,9 @@ if 'availability' not in st.session_state:
     st.session_state.availability = pd.DataFrame(True, index=dates, columns=all_players)
 
 if 'master_schedule' not in st.session_state:
-    loaded = load_saved()
+    loaded = load_from_drive()
+    if loaded is not None and '04 May 2026' in loaded['Date'].values:
+        loaded = None
     st.session_state.master_schedule = loaded if loaded is not None else pd.DataFrame()
     run_auto_allocation()
 
@@ -396,23 +377,26 @@ with st.sidebar:
 
 # --- PAGE 1: ROTATION ---
 if page == "Rotation":
-    rd = st.session_state.get('round_selection', 1)
     date_list = build_date_list()
 
     # ── Handle incoming edit from JS via query params ─────────────────────────
-    # JS writes ?edit=pIdx_qIdx_newPos to the URL, Streamlit reruns and we
-    # catch it here, apply the edit, clear the param, save, rerun cleanly.
+    # JS writes ?edit=week_pIdx_qIdx_newPos so the week survives the navigation.
     qp = st.query_params
     if "edit" in qp:
         try:
             parts = qp["edit"].split("_")
-            p_idx, q_idx, new_pos = int(parts[0]), int(parts[1]), parts[2]
-            p_name = all_players[p_idx]
-            apply_manual_edit(rd, q_idx, p_name, new_pos)
-        except Exception:
-            pass
+            edit_week = int(parts[0])
+            p_idx     = int(parts[1])
+            q_idx     = int(parts[2])
+            new_pos   = parts[3]
+            st.session_state['round_selection'] = edit_week
+            apply_manual_edit(edit_week, q_idx, all_players[p_idx], new_pos)
+        except Exception as e:
+            st.toast(f"Edit error: {e}")
         st.query_params.clear()
         st.rerun()
+
+    rd = st.session_state.get('round_selection', 1)
 
     st.markdown(f"### {date_list[rd-1]}")
     st.slider("Match Week", 1, len(date_list), key="round_selection", label_visibility="collapsed")
@@ -475,9 +459,9 @@ if page == "Rotation":
         if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
         matrix[pIdx].Qs[qIdx] = val;
         render();
-        // Write to URL query param — Streamlit detects this and reruns
+        // Write week + edit info to URL query param so Python knows which week
         const url = new URL(window.parent.location.href);
-        url.searchParams.set('edit', pIdx + '_' + qIdx + '_' + val);
+        url.searchParams.set('edit', {rd} + '_' + pIdx + '_' + qIdx + '_' + val);
         window.parent.location.href = url.toString();
     }}
 
