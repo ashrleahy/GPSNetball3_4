@@ -3,3 +3,8 @@ base="light"
 backgroundColor="#ffffff"
 secondaryBackgroundColor="#f0f2f6"
 textColor="#262730"
+primaryColor="#ff4b4b"
+ 
+[server]
+enableCORS=false
+enableXsrfProtection=false
