@@ -16,6 +16,8 @@ st.markdown("""
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
     td { border: 1px solid #ddd; height: 38px; padding: 0; }
+    /* hide the signal input */
+    [data-testid="stTextInput"] { position: fixed !important; opacity: 0 !important; top: -200px !important; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -145,6 +147,25 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
                 if p and p != "N/A" and p in pc: pc[p][pos] += 1
     return df
 
+def apply_edit(schedule, avail, edit_str):
+    parts     = edit_str.strip().split("_")
+    edit_week = int(parts[0])
+    p_idx     = int(parts[1])
+    q_idx     = int(parts[2])
+    new_pos   = parts[3]
+    p_name    = ALL_PLAYERS[p_idx]
+    m_idx     = (edit_week - 1) * 4 + q_idx
+    old_pos   = next((c for c in ALL_SLOTS if schedule[m_idx].get(c) == p_name), None)
+    displaced = schedule[m_idx].get(new_pos)
+    schedule[m_idx][new_pos] = p_name
+    if old_pos:
+        schedule[m_idx][old_pos] = displaced
+    next_week = edit_week + 1
+    if next_week <= len(DATES):
+        pc, oc   = build_counts(schedule, next_week, 0)
+        schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
+    return schedule, edit_week
+
 # ── Always read from disk ──────────────────────────────────────────────────────
 avail    = file_read(AVAIL_FILE) or default_avail()
 schedule = file_read(SCHED_FILE)
@@ -163,37 +184,25 @@ if "week" not in st.session_state:
             st.session_state.week = i + 1
             break
 
-# ── Handle edit via query param ────────────────────────────────────────────────
-qp = st.query_params
-if "edit" in qp:
+# ── Signal input — JS writes here, Streamlit reads it ─────────────────────────
+# Rendered first so it exists in DOM before the grid iframe loads
+signal = st.text_input("sig", value="", key="edit_signal", label_visibility="collapsed")
+
+if signal and signal != st.session_state.get("last_signal", ""):
+    st.session_state.last_signal = signal
     try:
-        parts     = qp["edit"].split("_")
-        edit_week = int(parts[0])
-        p_idx     = int(parts[1])
-        q_idx     = int(parts[2])
-        new_pos   = parts[3]
-        p_name    = ALL_PLAYERS[p_idx]
-        m_idx     = (edit_week - 1) * 4 + q_idx
-        old_pos   = next((c for c in ALL_SLOTS if schedule[m_idx].get(c) == p_name), None)
-        displaced = schedule[m_idx].get(new_pos)
-        schedule[m_idx][new_pos] = p_name
-        if old_pos:
-            schedule[m_idx][old_pos] = displaced
-        next_week = edit_week + 1
-        if next_week <= len(DATES):
-            pc, oc   = build_counts(schedule, next_week, 0)
-            schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
+        schedule, edit_week = apply_edit(schedule, avail, signal)
         file_write(SCHED_FILE, schedule)
         st.session_state.week = edit_week
-        st.session_state.page = "Rotation"
     except Exception as e:
         st.error(f"Edit failed: {e}")
-    st.query_params.clear()
+    # Clear signal and rerun
+    st.session_state.edit_signal = ""
     st.rerun()
 
 # ── Nav ────────────────────────────────────────────────────────────────────────
 mtime = os.path.getmtime(SCHED_FILE) if os.path.exists(SCHED_FILE) else 0
-st.caption(f"💾 saved {datetime.fromtimestamp(mtime).strftime('%H:%M:%S') if mtime else 'never'}")
+st.caption(f"💾 {datetime.fromtimestamp(mtime).strftime('%H:%M:%S') if mtime else 'never'}")
 st.markdown("### 🏐 Netball Pro")
 c1, c2, c3, c4 = st.columns(4)
 with c1:
@@ -266,15 +275,22 @@ if page == "Rotation":
     }}
 
     function send(pIdx, qIdx, val) {{
+        // Update local display immediately
         const oldPos = matrix[pIdx].Qs[qIdx];
         const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === val);
         if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
         matrix[pIdx].Qs[qIdx] = val;
         render();
+        // Send signal to Streamlit via the hidden text input
         const signal = week + '_' + pIdx + '_' + qIdx + '_' + val;
-        const url = new URL(window.parent.location.href);
-        url.searchParams.set('edit', signal);
-        window.parent.location.href = url.toString();
+        const doc = window.parent.document;
+        const inputs = doc.querySelectorAll('input[type="text"]');
+        if (inputs.length > 0) {{
+            const input = inputs[0];
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(input, signal);
+            input.dispatchEvent(new Event('input', {{bubbles: true}}));
+        }}
     }}
     render();
     </script>
