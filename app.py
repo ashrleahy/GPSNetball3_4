@@ -1,7 +1,6 @@
 import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
-import streamlit.components.v1 as components
 import os, json
 
 st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
@@ -13,11 +12,7 @@ st.markdown("""
     #MainMenu { visibility: hidden; }
     header, footer { visibility: hidden; }
     .block-container { padding: 0.3rem !important; max-width: 480px !important; margin: auto !important; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
-    td { border: 1px solid #ddd; height: 38px; padding: 0; }
-    /* hide the signal input */
-    [data-testid="stTextInput"] { position: fixed !important; opacity: 0 !important; top: -200px !important; }
+    div[data-testid="stHorizontalBlock"] { gap: 4px; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -147,25 +142,6 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
                 if p and p != "N/A" and p in pc: pc[p][pos] += 1
     return df
 
-def apply_edit(schedule, avail, edit_str):
-    parts     = edit_str.strip().split("_")
-    edit_week = int(parts[0])
-    p_idx     = int(parts[1])
-    q_idx     = int(parts[2])
-    new_pos   = parts[3]
-    p_name    = ALL_PLAYERS[p_idx]
-    m_idx     = (edit_week - 1) * 4 + q_idx
-    old_pos   = next((c for c in ALL_SLOTS if schedule[m_idx].get(c) == p_name), None)
-    displaced = schedule[m_idx].get(new_pos)
-    schedule[m_idx][new_pos] = p_name
-    if old_pos:
-        schedule[m_idx][old_pos] = displaced
-    next_week = edit_week + 1
-    if next_week <= len(DATES):
-        pc, oc   = build_counts(schedule, next_week, 0)
-        schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
-    return schedule, edit_week
-
 # ── Always read from disk ──────────────────────────────────────────────────────
 avail    = file_read(AVAIL_FILE) or default_avail()
 schedule = file_read(SCHED_FILE)
@@ -183,22 +159,6 @@ if "week" not in st.session_state:
         if datetime.strptime(d_str, "%d %b %Y").date() >= today:
             st.session_state.week = i + 1
             break
-
-# ── Signal input — JS writes here, Streamlit reads it ─────────────────────────
-# Rendered first so it exists in DOM before the grid iframe loads
-signal = st.text_input("sig", value="", key="edit_signal", label_visibility="collapsed")
-
-if signal and signal != st.session_state.get("last_signal", ""):
-    st.session_state.last_signal = signal
-    try:
-        schedule, edit_week = apply_edit(schedule, avail, signal)
-        file_write(SCHED_FILE, schedule)
-        st.session_state.week = edit_week
-    except Exception as e:
-        st.error(f"Edit failed: {e}")
-    # Clear signal and rerun
-    st.session_state.edit_signal = ""
-    st.rerun()
 
 # ── Nav ────────────────────────────────────────────────────────────────────────
 mtime = os.path.getmtime(SCHED_FILE) if os.path.exists(SCHED_FILE) else 0
@@ -229,73 +189,84 @@ if page == "Rotation":
     st.markdown(f"### {DATES[w-1]}")
     st.slider("Match Week", 1, len(DATES), key="week", label_visibility="collapsed")
 
-    week_rows   = [r for r in schedule if r["week"] == w]
-    matrix_data = []
+    week_rows = [r for r in schedule if r["week"] == w]
+
+    # Build a selectbox grid using native Streamlit — same visual layout, no JS needed
+    # Header row
+    cols = st.columns([1.8, 1, 1, 1, 1])
+    cols[0].markdown("<div style='font-size:10px;color:#444;padding:4px;background:#f8f9fa;border:1px solid #ddd;text-align:center'>NAME</div>", unsafe_allow_html=True)
+    for qi, lbl in enumerate(["Q1","Q2","Q3","Q4"]):
+        cols[qi+1].markdown(f"<div style='font-size:10px;color:#444;padding:4px;background:#f8f9fa;border:1px solid #ddd;text-align:center'>{lbl}</div>", unsafe_allow_html=True)
+
+    # Track edits in session state
+    if "edits" not in st.session_state:
+        st.session_state.edits = {}
+
+    edit_key = f"w{w}"
+
+    # Player rows
     for p in ALL_PLAYERS:
-        row = {"name": p, "Qs": []}
+        cols = st.columns([1.8, 1, 1, 1, 1])
+        cols[0].markdown(f"<div style='font-size:10px;font-weight:bold;padding:4px;border:1px solid #ddd;height:38px;display:flex;align-items:center;background:#fff'>{p}</div>", unsafe_allow_html=True)
         for qi in range(4):
             qrow = week_rows[qi]
-            pos  = next((c for c in ALL_SLOTS if qrow.get(c) == p), "Off")
-            row["Qs"].append(pos)
-        matrix_data.append(row)
+            current_pos = next((c for c in ALL_SLOTS if qrow.get(c) == p), "Off")
+            # Check if there's a pending edit for this cell
+            cell_key = f"{edit_key}_p{ALL_PLAYERS.index(p)}_q{qi}"
+            default_idx = ALL_SLOTS.index(st.session_state.edits.get(cell_key, current_pos))
+            bg = POS_COLORS.get(st.session_state.edits.get(cell_key, current_pos), "#F5F5F5")
+            with cols[qi+1]:
+                chosen = st.selectbox(
+                    label=cell_key,
+                    options=ALL_SLOTS,
+                    index=default_idx,
+                    key=cell_key,
+                    label_visibility="collapsed"
+                )
+                st.session_state.edits[cell_key] = chosen
 
-    html_grid = f"""
-    <div id="grid-root"></div>
-    <script>
-    const slots  = {json.dumps(ALL_SLOTS)};
-    const colors = {json.dumps(POS_COLORS)};
-    let matrix   = {json.dumps(matrix_data)};
-    const week   = {w};
+    # Save button
+    st.markdown("---")
+    col_save, col_disc = st.columns(2)
+    with col_save:
+        if st.button("💾 Save Changes", use_container_width=True, type="primary"):
+            # Apply all edits for this week
+            for p in ALL_PLAYERS:
+                p_idx = ALL_PLAYERS.index(p)
+                for qi in range(4):
+                    cell_key = f"{edit_key}_p{p_idx}_q{qi}"
+                    new_pos = st.session_state.edits.get(cell_key)
+                    if not new_pos:
+                        continue
+                    m_idx = (w - 1) * 4 + qi
+                    old_pos = next((c for c in ALL_SLOTS if schedule[m_idx].get(c) == p), None)
+                    if old_pos == new_pos:
+                        continue
+                    # Swap
+                    displaced = schedule[m_idx].get(new_pos)
+                    schedule[m_idx][new_pos] = p
+                    if old_pos:
+                        schedule[m_idx][old_pos] = displaced
 
-    function render() {{
-        let h = `<table style="width:100%;border-collapse:collapse;font-family:sans-serif;table-layout:fixed;">
-            <thead><tr style="background:#eee;font-size:10px;">
-                <th style="width:18%;padding:4px;border:1px solid #ddd;">NAME</th>
-                <th style="width:20.5%;border:1px solid #ddd;">Q1</th>
-                <th style="width:20.5%;border:1px solid #ddd;">Q2</th>
-                <th style="width:20.5%;border:1px solid #ddd;">Q3</th>
-                <th style="width:20.5%;border:1px solid #ddd;">Q4</th>
-            </tr></thead><tbody>`;
-        matrix.forEach((row, pIdx) => {{
-            h += `<tr style="height:38px;">
-                <td style="font-size:10px;font-weight:bold;padding-left:3px;border:1px solid #ddd;background:#fff;overflow:hidden;white-space:nowrap;text-overflow:ellipsis;">${{row.name}}</td>`;
-            row.Qs.forEach((pos, qIdx) => {{
-                const opts = slots.map(s => `<option value="${{s}}" ${{s===pos?'selected':''}}>${{s}}</option>`).join('');
-                h += `<td style="padding:0;border:1px solid #ddd;background:${{colors[pos]||'#F5F5F5'}};">
-                    <select onchange="send(${{pIdx}},${{qIdx}},this.value)"
-                        style="width:100%;height:100%;border:none;background:transparent;font-size:10px;font-weight:bold;text-align:center;appearance:none;cursor:pointer;">
-                        ${{opts}}
-                    </select>
-                </td>`;
-            }});
-            h += `</tr>`;
-        }});
-        h += `</tbody></table>`;
-        document.getElementById('grid-root').innerHTML = h;
-    }}
+            # Rebalance from next week
+            next_week = w + 1
+            if next_week <= len(DATES):
+                pc, oc = build_counts(schedule, next_week, 0)
+                schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
 
-    function send(pIdx, qIdx, val) {{
-        // Update local display immediately
-        const oldPos = matrix[pIdx].Qs[qIdx];
-        const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === val);
-        if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
-        matrix[pIdx].Qs[qIdx] = val;
-        render();
-        // Send signal to Streamlit via the hidden text input
-        const signal = week + '_' + pIdx + '_' + qIdx + '_' + val;
-        const doc = window.parent.document;
-        const inputs = doc.querySelectorAll('input[type="text"]');
-        if (inputs.length > 0) {{
-            const input = inputs[0];
-            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-            setter.call(input, signal);
-            input.dispatchEvent(new Event('input', {{bubbles: true}}));
-        }}
-    }}
-    render();
-    </script>
-    """
-    components.html(html_grid, height=380)
+            file_write(SCHED_FILE, schedule)
+            # Clear edits for this week
+            for key in list(st.session_state.edits.keys()):
+                if key.startswith(edit_key):
+                    del st.session_state.edits[key]
+            st.success("Saved!")
+            st.rerun()
+    with col_disc:
+        if st.button("↩ Discard", use_container_width=True):
+            for key in list(st.session_state.edits.keys()):
+                if key.startswith(edit_key):
+                    del st.session_state.edits[key]
+            st.rerun()
 
 # ── Availability ───────────────────────────────────────────────────────────────
 elif page == "Availability":
