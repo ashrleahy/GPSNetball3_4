@@ -398,6 +398,22 @@ with st.sidebar:
 if page == "Rotation":
     rd = st.session_state.get('round_selection', 1)
     date_list = build_date_list()
+
+    # ── Handle incoming edit from JS via query params ─────────────────────────
+    # JS writes ?edit=pIdx_qIdx_newPos to the URL, Streamlit reruns and we
+    # catch it here, apply the edit, clear the param, save, rerun cleanly.
+    qp = st.query_params
+    if "edit" in qp:
+        try:
+            parts = qp["edit"].split("_")
+            p_idx, q_idx, new_pos = int(parts[0]), int(parts[1]), parts[2]
+            p_name = all_players[p_idx]
+            apply_manual_edit(rd, q_idx, p_name, new_pos)
+        except Exception:
+            pass
+        st.query_params.clear()
+        st.rerun()
+
     st.markdown(f"### {date_list[rd-1]}")
     st.slider("Match Week", 1, len(date_list), key="round_selection", label_visibility="collapsed")
 
@@ -405,55 +421,72 @@ if page == "Rotation":
         st.session_state.master_schedule['Week'] == rd
     ].reset_index(drop=True)
 
-    # Header row
-    header_cols = st.columns([2, 1, 1, 1, 1])
-    header_cols[0].markdown("<small><b>NAME</b></small>", unsafe_allow_html=True)
-    for i, q in enumerate(["Q1", "Q2", "Q3", "Q4"]):
-        header_cols[i+1].markdown(f"<small><b>{q}</b></small>", unsafe_allow_html=True)
-
-    st.markdown("<hr style='margin:2px 0'>", unsafe_allow_html=True)
-
-    # One row per player
-    # KEY FIX: Before rendering any selectbox, force its session_state key to
-    # match the dataframe value. This prevents Streamlit from restoring a
-    # stale widget value after st.rerun(), which caused the revert bug.
+    # Build matrix_data for the HTML table (same structure as original)
+    matrix_data = []
     for p in all_players:
-        for q_idx in range(4):
-            q_row = view_df.iloc[q_idx]
-            current_pos = next((c for c in all_slots if q_row[c] == p), "Off")
-            widget_key = f"sel_{rd}_{p}_{q_idx}"
-            st.session_state[widget_key] = current_pos  # always sync from dataframe
+        row = {"name": p, "Qs": []}
+        for i in range(4):
+            q_data = view_df.iloc[i]
+            pos = next((c for c in all_slots if q_data[c] == p), "Off")
+            row["Qs"].append(pos)
+        matrix_data.append(row)
 
-    for p in all_players:
-        row_cols = st.columns([2, 1, 1, 1, 1])
-        row_cols[0].markdown(
-            f"<div style='font-size:10px; font-weight:bold; padding-top:8px;'>{p}</div>",
-            unsafe_allow_html=True
-        )
-        for q_idx in range(4):
-            q_row = view_df.iloc[q_idx]
-            current_pos = next((c for c in all_slots if q_row[c] == p), "Off")
-            color = pos_colors.get(current_pos, "#F5F5F5")
-            widget_key = f"sel_{rd}_{p}_{q_idx}"
+    # HTML GRID — identical look to original, but uses query param to
+    # communicate changes back to Python instead of broken postMessage.
+    html_grid = f"""
+    <div id="grid-root"></div>
+    <script>
+    const players = {json.dumps(all_players)};
+    const slots = {json.dumps(all_slots)};
+    const colors = {json.dumps(pos_colors)};
+    let matrix = {json.dumps(matrix_data)};
 
-            new_pos = row_cols[q_idx + 1].selectbox(
-                label=f"{p}_Q{q_idx+1}",
-                options=all_slots,
-                key=widget_key,
-                label_visibility="collapsed"
-            )
+    function render() {{
+        let h = `<table style="width:100%; border-collapse:collapse; font-family:sans-serif; table-layout:fixed;">
+            <thead><tr style="background:#eee; font-size:10px;">
+                <th style="width:18%; padding:4px; border:1px solid #ddd;">NAME</th>
+                <th style="width:20.5%; border:1px solid #ddd;">Q1</th>
+                <th style="width:20.5%; border:1px solid #ddd;">Q2</th>
+                <th style="width:20.5%; border:1px solid #ddd;">Q3</th>
+                <th style="width:20.5%; border:1px solid #ddd;">Q4</th>
+            </tr></thead><tbody>`;
 
-            # Colour strip under each selectbox to mimic original colour cells
-            row_cols[q_idx + 1].markdown(
-                f"<div style='background:{color}; height:5px; margin-top:-10px; border-radius:2px;'></div>",
-                unsafe_allow_html=True
-            )
+        matrix.forEach((row, pIdx) => {{
+            h += `<tr style="height:38px;">
+                <td style="font-size:10px; font-weight:bold; padding-left:3px; border:1px solid #ddd; background:#fff; overflow:hidden; white-space:nowrap; text-overflow:ellipsis;">${{row.name}}</td>`;
+            row.Qs.forEach((pos, qIdx) => {{
+                h += `<td style="padding:0; border:1px solid #ddd; background:${{colors[pos]}};">
+                    <select onchange="send(${{pIdx}}, ${{qIdx}}, this.value)"
+                        style="width:100%; height:100%; border:none; background:transparent; font-size:10px; font-weight:bold; text-align:center; appearance:none; cursor:pointer;">
+                        ${{slots.map(s => `<option value="${{s}}" ${{s===pos?'selected':''}}>${{s}}</option>`).join('')}}
+                    </select>
+                </td>`;
+            }});
+            h += `</tr>`;
+        }});
+        h += `</tbody></table>`;
+        document.getElementById('grid-root').innerHTML = h;
+    }}
 
-            if new_pos != current_pos:
-                apply_manual_edit(rd, q_idx, p, new_pos)
-                st.rerun()
+    function send(pIdx, qIdx, val) {{
+        // Optimistic local update so table feels instant
+        const oldPos = matrix[pIdx].Qs[qIdx];
+        const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === val);
+        if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
+        matrix[pIdx].Qs[qIdx] = val;
+        render();
+        // Write to URL query param — Streamlit detects this and reruns
+        const url = new URL(window.parent.location.href);
+        url.searchParams.set('edit', pIdx + '_' + qIdx + '_' + val);
+        window.parent.location.href = url.toString();
+    }}
 
-    st.markdown("<hr style='margin:4px 0'>", unsafe_allow_html=True)
+    render();
+    </script>
+    """
+
+    from streamlit.components.v1 import html as st_html
+    st_html(html_grid, height=350)
 
 
 # --- PAGE 2: AVAILABILITY ---
