@@ -1,41 +1,13 @@
-import streamlit as st
-import pandas as pd
+from flask import Flask, request, jsonify, render_template_string
 from datetime import datetime, date, timedelta
-import streamlit.components.v1 as components
 import os, json
 
-st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
-
-st.markdown("""
-    <style>
-    [data-testid="stSidebar"] { display: none !important; }
-    [data-testid="collapsedControl"] { display: none !important; }
-    #MainMenu { visibility: hidden; }
-    header, footer { visibility: hidden; }
-    .block-container { padding: 0.3rem !important; max-width: 480px !important; margin: auto !important; }
-    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
-    th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
-    td { border: 1px solid #ddd; height: 38px; padding: 0; }
-    </style>
-""", unsafe_allow_html=True)
+app = Flask(__name__)
 
 DATA_DIR   = os.environ.get("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 SCHED_FILE = os.path.join(DATA_DIR, "schedule.json")
 AVAIL_FILE = os.path.join(DATA_DIR, "avail.json")
-
-def file_read(path):
-    try:
-        with open(path) as f:
-            return json.load(f)
-    except:
-        return None
-
-def file_write(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-        f.flush()
-        os.fsync(f.fileno())
 
 ALL_PLAYERS = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
 POSITIONS   = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
@@ -61,6 +33,17 @@ def build_dates():
     return dates
 
 DATES = build_dates()
+
+def file_read(path):
+    try:
+        with open(path) as f: return json.load(f)
+    except: return None
+
+def file_write(path, data):
+    with open(path, "w") as f:
+        json.dump(data, f)
+        f.flush()
+        os.fsync(f.fileno())
 
 def default_avail():
     return {d: {p: True for p in ALL_PLAYERS} for d in DATES}
@@ -145,42 +128,44 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
                 if p and p != "N/A" and p in pc: pc[p][pos] += 1
     return df
 
-# ── Always read from disk ──────────────────────────────────────────────────────
-avail    = file_read(AVAIL_FILE) or default_avail()
-schedule = file_read(SCHED_FILE)
-if not schedule:
-    pc, oc   = build_counts([])
-    schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
-    file_write(SCHED_FILE, schedule)
+def get_schedule():
+    s = file_read(SCHED_FILE)
+    if not s:
+        avail = file_read(AVAIL_FILE) or default_avail()
+        pc, oc = build_counts([])
+        s = run_allocation_from(default_schedule(), avail, 1, pc, oc)
+        file_write(SCHED_FILE, s)
+    return s
 
-if "page" not in st.session_state:
-    st.session_state.page = "Rotation"
-if "week" not in st.session_state:
+def get_default_week():
     today = date.today()
-    st.session_state.week = len(DATES)
     for i, d_str in enumerate(DATES):
         if datetime.strptime(d_str, "%d %b %Y").date() >= today:
-            st.session_state.week = i + 1
-            break
+            return i + 1
+    return len(DATES)
 
-# ── Handle save via query param — just the final positions, tiny payload ───────
-qp = st.query_params
-if "save" in qp:
+# ── API endpoints ──────────────────────────────────────────────────────────────
+
+@app.route("/api/schedule")
+def api_schedule():
+    return jsonify(get_schedule())
+
+@app.route("/api/save", methods=["POST"])
+def api_save():
     try:
-        # Format: "week|p0q0pos,p0q1pos,p0q2pos,p0q3pos|p1q0pos,..." 
-        parts     = qp["save"].split("|")
-        save_week = int(parts[0])
-        for pi, player_part in enumerate(parts[1:]):
-            qpositions = player_part.split(",")
-            for qi, pos in enumerate(qpositions):
-                m_idx = (save_week - 1) * 4 + qi
-                # Remove this player from wherever they are
-                p_name = ALL_PLAYERS[pi]
-                for s in ALL_SLOTS:
-                    if schedule[m_idx].get(s) == p_name:
-                        schedule[m_idx][s] = None
-                # Place them in new position
-                schedule[m_idx][pos] = p_name
+        payload  = request.get_json()
+        save_week = payload["week"]
+        matrix   = payload["matrix"]
+        schedule = get_schedule()
+        avail    = file_read(AVAIL_FILE) or default_avail()
+
+        # Apply matrix to schedule
+        for qi in range(4):
+            m_idx = (save_week - 1) * 4 + qi
+            for s in ALL_SLOTS:
+                schedule[m_idx][s] = None
+            for row in matrix:
+                schedule[m_idx][row["Qs"][qi]] = row["name"]
 
         # Rebalance future weeks
         next_week = save_week + 1
@@ -189,78 +174,148 @@ if "save" in qp:
             schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
 
         file_write(SCHED_FILE, schedule)
-        st.session_state.week = save_week
+        return jsonify({"ok": True})
     except Exception as e:
-        st.error(f"Save failed: {e}")
-    st.query_params.clear()
-    st.rerun()
+        return jsonify({"ok": False, "error": str(e)}), 500
 
-# ── Nav ────────────────────────────────────────────────────────────────────────
-mtime = os.path.getmtime(SCHED_FILE) if os.path.exists(SCHED_FILE) else 0
-st.caption(f"💾 {datetime.fromtimestamp(mtime).strftime('%H:%M:%S') if mtime else 'never'}")
-st.markdown("### 🏐 Netball Pro")
-c1, c2, c3, c4 = st.columns(4)
-with c1:
-    if st.button("Rotation", use_container_width=True):
-        st.session_state.page = "Rotation"; st.rerun()
-with c2:
-    if st.button("Availability", use_container_width=True):
-        st.session_state.page = "Availability"; st.rerun()
-with c3:
-    if st.button("Stats", use_container_width=True):
-        st.session_state.page = "Stats"; st.rerun()
-with c4:
-    if st.button("🚨 Reset", use_container_width=True):
-        pc, oc   = build_counts([])
-        schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
-        file_write(SCHED_FILE, schedule)
-        st.rerun()
+@app.route("/api/reset", methods=["POST"])
+def api_reset():
+    avail = file_read(AVAIL_FILE) or default_avail()
+    pc, oc = build_counts([])
+    schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
+    file_write(SCHED_FILE, schedule)
+    return jsonify({"ok": True})
 
-page = st.session_state.page
+@app.route("/api/avail")
+def api_avail():
+    return jsonify(file_read(AVAIL_FILE) or default_avail())
 
-# ── Rotation ───────────────────────────────────────────────────────────────────
-if page == "Rotation":
-    w = st.session_state.week
-    st.markdown(f"### {DATES[w-1]}")
-    st.slider("Match Week", 1, len(DATES), key="week", label_visibility="collapsed")
+@app.route("/api/avail", methods=["POST"])
+def api_save_avail():
+    avail = request.get_json()
+    file_write(AVAIL_FILE, avail)
+    pc, oc = build_counts([])
+    schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
+    file_write(SCHED_FILE, schedule)
+    return jsonify({"ok": True})
 
-    week_rows   = [r for r in schedule if r["week"] == w]
-    matrix_data = []
-    for p in ALL_PLAYERS:
-        row = {"name": p, "Qs": []}
-        for qi in range(4):
-            pos = next((c for c in ALL_SLOTS if week_rows[qi].get(c) == p), "Off")
-            row["Qs"].append(pos)
-        matrix_data.append(row)
+# ── Main HTML app ──────────────────────────────────────────────────────────────
 
-    html_grid = f"""
-    <style>
-    table {{ width:100%; border-collapse:collapse; font-family:sans-serif; table-layout:fixed; }}
-    th {{ font-size:10px; color:#444; padding:4px; border:1px solid #ddd; background:#f8f9fa; }}
-    td {{ border:1px solid #ddd; height:38px; padding:0; }}
-    select {{ width:100%; height:100%; border:none; background:transparent; font-size:10px;
-              font-weight:bold; text-align:center; appearance:none; cursor:pointer; }}
-    #save-btn {{
-        margin-top:6px; width:100%; padding:8px; background:#ff4b4b; color:white;
-        border:none; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;
-    }}
-    #status {{ font-size:11px; color:#888; text-align:center; margin-top:3px; min-height:16px; }}
-    </style>
+HTML = """<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>Netball Pro 🏐</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { font-family: sans-serif; background: #f0f0f0; }
+.app { max-width: 480px; margin: 0 auto; background: #fff; min-height: 100vh; padding: 6px; }
+.top { display: flex; align-items: center; gap: 6px; margin-bottom: 6px; }
+.top h2 { font-size: 14px; font-weight: bold; flex: 1; }
+.nav { display: flex; gap: 4px; margin-bottom: 8px; }
+.nav button { flex: 1; font-size: 11px; padding: 4px; border: 1px solid #ccc;
+              border-radius: 4px; background: #f8f8f8; cursor: pointer; }
+.nav button.active { background: #333; color: #fff; border-color: #333; }
+.btn-danger { border-color: #f44 !important; color: #c00 !important; }
+.page-title { font-size: 13px; font-weight: bold; text-align: center; margin-bottom: 4px; }
+.slider-wrap { margin-bottom: 6px; }
+.slider-wrap input { width: 100%; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
+td { border: 1px solid #ddd; height: 38px; padding: 0; }
+.name-cell { font-size: 10px; font-weight: bold; padding-left: 3px; background: #fff;
+             overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+select { width: 100%; height: 100%; border: none; background: transparent; font-size: 10px;
+         font-weight: bold; text-align: center; appearance: none; cursor: pointer; }
+.save-btn { width: 100%; margin-top: 6px; padding: 8px; background: #ff4b4b; color: #fff;
+            border: none; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: pointer; }
+.save-btn:disabled { background: #ccc; }
+.status { font-size: 11px; color: #888; text-align: center; margin-top: 3px; min-height: 16px; }
+.mtime { font-size: 10px; color: #aaa; text-align: right; margin-bottom: 4px; }
+.avail-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.avail-table th, .avail-table td { border: 1px solid #ddd; padding: 4px; text-align: center; }
+.avail-table td:first-child { text-align: left; }
+.stats-table { width: 100%; border-collapse: collapse; font-size: 10px; }
+.stats-table th, .stats-table td { border: 1px solid #ddd; padding: 4px; text-align: center; }
+.stats-table td:first-child { text-align: left; font-weight: bold; }
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="top">
+    <h2>🏐 Netball Pro</h2>
+    <button class="nav" style="flex:none;padding:4px 8px;font-size:11px;border:1px solid #f44;
+            color:#c00;border-radius:4px;background:#f8f8f8;cursor:pointer"
+            onclick="doReset()">🚨 Reset</button>
+  </div>
+  <div class="nav">
+    <button id="nav-rotation" class="active" onclick="showPage('rotation')">Rotation</button>
+    <button id="nav-availability" onclick="showPage('availability')">Availability</button>
+    <button id="nav-stats" onclick="showPage('stats')">Stats</button>
+  </div>
+  <div id="page-rotation"></div>
+  <div id="page-availability" style="display:none"></div>
+  <div id="page-stats" style="display:none"></div>
+</div>
 
-    <div id="grid-root"></div>
-    <button id="save-btn" onclick="saveChanges()">💾 Save &amp; Rebalance</button>
-    <div id="status"></div>
+<script>
+const ALL_PLAYERS = """ + json.dumps(ALL_PLAYERS) + """;
+const POSITIONS   = """ + json.dumps(POSITIONS) + """;
+const ALL_SLOTS   = """ + json.dumps(ALL_SLOTS) + """;
+const POS_COLORS  = """ + json.dumps(POS_COLORS) + """;
+const DATES       = """ + json.dumps(DATES) + """;
 
-    <script>
-    const slots   = {json.dumps(ALL_SLOTS)};
-    const colors  = {json.dumps(POS_COLORS)};
-    const players = {json.dumps(ALL_PLAYERS)};
-    const week    = {w};
-    let matrix    = {json.dumps(matrix_data)};
-    let dirty     = false;
+let schedule = [];
+let avail    = {};
+let currentWeek = """ + str(get_default_week()) + """;
+let currentPage = 'rotation';
+let matrix = [];
+let dirty = false;
 
-    function render() {{
-        let h = `<table>
+async function loadAll() {
+    const [s, a] = await Promise.all([
+        fetch('/api/schedule').then(r => r.json()),
+        fetch('/api/avail').then(r => r.json())
+    ]);
+    schedule = s;
+    avail    = a;
+    renderRotation();
+    renderAvailability();
+    renderStats();
+}
+
+function showPage(p) {
+    currentPage = p;
+    ['rotation','availability','stats'].forEach(name => {
+        document.getElementById('page-' + name).style.display = name === p ? '' : 'none';
+        document.getElementById('nav-' + name).classList.toggle('active', name === p);
+    });
+}
+
+// ── ROTATION ──────────────────────────────────────────────────────────────────
+function buildMatrix(w) {
+    const weekRows = schedule.filter(r => r.week === w);
+    return ALL_PLAYERS.map(p => ({
+        name: p,
+        Qs: [0,1,2,3].map(qi => {
+            const row = weekRows[qi];
+            return ALL_SLOTS.find(s => row && row[s] === p) || 'Off';
+        })
+    }));
+}
+
+function renderRotation() {
+    matrix = buildMatrix(currentWeek);
+    dirty  = false;
+    const mtime = ''; // server doesn't expose this but that's fine
+    let html = `
+        <div class="page-title">${DATES[currentWeek-1]}</div>
+        <div class="slider-wrap">
+            <input type="range" min="1" max="${DATES.length}" value="${currentWeek}"
+                   oninput="changeWeek(parseInt(this.value))"/>
+        </div>
+        <table>
             <thead><tr>
                 <th style="width:18%">NAME</th>
                 <th style="width:20.5%">Q1</th>
@@ -268,80 +323,157 @@ if page == "Rotation":
                 <th style="width:20.5%">Q3</th>
                 <th style="width:20.5%">Q4</th>
             </tr></thead><tbody>`;
-        matrix.forEach((row, pIdx) => {{
-            h += `<tr><td style="font-size:10px;font-weight:bold;padding-left:3px;
-                       background:#fff;overflow:hidden;white-space:nowrap;
-                       text-overflow:ellipsis">${{row.name}}</td>`;
-            row.Qs.forEach((pos, qIdx) => {{
-                const bg   = colors[pos] || '#F5F5F5';
-                const opts = slots.map(s =>
-                    `<option value="${{s}}" ${{s===pos?'selected':''}}>${{s}}</option>`
-                ).join('');
-                h += `<td style="background:${{bg}}">
-                    <select onchange="onEdit(${{pIdx}},${{qIdx}},this.value)">${{opts}}</select>
-                </td>`;
-            }});
-            h += `</tr>`;
-        }});
-        h += `</tbody></table>`;
-        document.getElementById('grid-root').innerHTML = h;
-        document.getElementById('status').textContent =
-            dirty ? '● Unsaved changes' : '';
-    }}
+    matrix.forEach((row, pIdx) => {
+        html += `<tr><td class="name-cell">${row.name}</td>`;
+        row.Qs.forEach((pos, qIdx) => {
+            const bg   = POS_COLORS[pos] || '#F5F5F5';
+            const opts = ALL_SLOTS.map(s =>
+                `<option value="${s}" ${s===pos?'selected':''}>${s}</option>`
+            ).join('');
+            html += `<td style="background:${bg}">
+                <select onchange="onEdit(${pIdx},${qIdx},this.value)">${opts}</select>
+            </td>`;
+        });
+        html += '</tr>';
+    });
+    html += `</tbody></table>
+        <button class="save-btn" id="save-btn" onclick="saveChanges()">💾 Save &amp; Rebalance</button>
+        <div class="status" id="status"></div>`;
+    document.getElementById('page-rotation').innerHTML = html;
+}
 
-    function onEdit(pIdx, qIdx, newPos) {{
-        const oldPos = matrix[pIdx].Qs[qIdx];
-        if (oldPos === newPos) return;
-        // Swap with whoever currently has newPos in this quarter
-        const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === newPos);
-        if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
-        matrix[pIdx].Qs[qIdx] = newPos;
-        dirty = true;
-        render();
-    }}
+function changeWeek(w) {
+    if (dirty && !confirm('You have unsaved changes. Discard?')) {
+        document.querySelector('.slider-wrap input').value = currentWeek;
+        return;
+    }
+    currentWeek = w;
+    renderRotation();
+}
 
-    function saveChanges() {{
-        if (!dirty) return;
-        // Encode as: "week|p0q0,p0q1,p0q2,p0q3|p1q0,..." — tiny string
-        const parts = [week];
-        matrix.forEach(row => parts.push(row.Qs.join(',')));
-        const payload = parts.join('|');
-        const url = new URL(window.parent.location.href);
-        url.searchParams.set('save', payload);
-        document.getElementById('save-btn').textContent = 'Saving...';
-        document.getElementById('save-btn').disabled = true;
-        window.parent.location.href = url.toString();
-    }}
+function onEdit(pIdx, qIdx, newPos) {
+    const oldPos = matrix[pIdx].Qs[qIdx];
+    if (oldPos === newPos) return;
+    const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === newPos);
+    if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
+    matrix[pIdx].Qs[qIdx] = newPos;
+    // Update cell background
+    const cells = document.querySelectorAll('td select');
+    cells.forEach(sel => {
+        sel.parentElement.style.background = POS_COLORS[sel.value] || '#F5F5F5';
+    });
+    dirty = true;
+    document.getElementById('status').textContent = '● Unsaved changes';
+}
 
-    render();
-    </script>
-    """
-    components.html(html_grid, height=430)
+async function saveChanges() {
+    if (!dirty) return;
+    const btn = document.getElementById('save-btn');
+    btn.disabled = true;
+    btn.textContent = 'Saving...';
+    try {
+        const resp = await fetch('/api/save', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({week: currentWeek, matrix})
+        });
+        const result = await resp.json();
+        if (result.ok) {
+            // Reload schedule from server
+            schedule = await fetch('/api/schedule').then(r => r.json());
+            matrix = buildMatrix(currentWeek);
+            dirty = false;
+            document.getElementById('status').textContent = '✅ Saved!';
+            btn.textContent = '💾 Save & Rebalance';
+            btn.disabled = false;
+            renderStats();
+        } else {
+            document.getElementById('status').textContent = 'Error: ' + result.error;
+            btn.textContent = '💾 Save & Rebalance';
+            btn.disabled = false;
+        }
+    } catch(e) {
+        document.getElementById('status').textContent = 'Failed: ' + e.message;
+        btn.textContent = '💾 Save & Rebalance';
+        btn.disabled = false;
+    }
+}
 
-# ── Availability ───────────────────────────────────────────────────────────────
-elif page == "Availability":
-    st.markdown("### Availability Planner")
-    avail_df = pd.DataFrame(avail).T[ALL_PLAYERS]
-    updated  = st.data_editor(avail_df, use_container_width=True)
-    if st.button("Apply & Re-Balance"):
-        new_avail = updated.to_dict(orient="index")
-        file_write(AVAIL_FILE, new_avail)
-        pc, oc   = build_counts([])
-        schedule = run_allocation_from(default_schedule(), new_avail, 1, pc, oc)
-        file_write(SCHED_FILE, schedule)
-        st.rerun()
+// ── AVAILABILITY ──────────────────────────────────────────────────────────────
+function renderAvailability() {
+    let html = `<div class="page-title">Availability Planner</div>
+        <table class="avail-table"><thead><tr>
+            <th>Date</th>${ALL_PLAYERS.map(p => `<th>${p.slice(0,4)}</th>`).join('')}
+        </tr></thead><tbody>`;
+    DATES.forEach(d => {
+        html += `<tr><td>${d}</td>`;
+        ALL_PLAYERS.forEach(p => {
+            const chk = avail[d] && avail[d][p] ? 'checked' : '';
+            html += `<td><input type="checkbox" ${chk} onchange="availChange('${d}','${p}',this.checked)"/></td>`;
+        });
+        html += '</tr>';
+    });
+    html += `</tbody></table>
+        <button onclick="saveAvail()" style="margin-top:8px;width:100%;padding:6px;
+                background:#333;color:#fff;border:none;border-radius:4px;cursor:pointer;font-size:12px">
+            Apply & Re-Balance</button>`;
+    document.getElementById('page-availability').innerHTML = html;
+}
 
-# ── Stats ──────────────────────────────────────────────────────────────────────
-elif page == "Stats":
-    st.markdown("### Season Statistics")
-    counts = {p: {pos: 0 for pos in POSITIONS} | {"Off": 0} for p in ALL_PLAYERS}
-    for row in schedule:
-        for pos in POSITIONS:
-            p = row.get(pos)
-            if p and p != "N/A" and p in counts:
-                counts[p][pos] += 1
-        off_p = row.get("Off")
-        if off_p and off_p != "N/A" and off_p in counts:
-            counts[off_p]["Off"] += 1
-    stats_df = pd.DataFrame(counts).T[POSITIONS + ["Off"]]
-    st.dataframe(stats_df, use_container_width=True)
+function availChange(d, p, val) {
+    if (!avail[d]) avail[d] = {};
+    avail[d][p] = val;
+}
+
+async function saveAvail() {
+    await fetch('/api/avail', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(avail)
+    });
+    schedule = await fetch('/api/schedule').then(r => r.json());
+    renderRotation();
+    renderStats();
+}
+
+// ── STATS ─────────────────────────────────────────────────────────────────────
+function renderStats() {
+    const counts = {};
+    ALL_PLAYERS.forEach(p => { counts[p] = {}; POSITIONS.forEach(pos => counts[p][pos]=0); counts[p].Off=0; });
+    schedule.forEach(row => {
+        POSITIONS.forEach(pos => { if (row[pos] && counts[row[pos]]) counts[row[pos]][pos]++; });
+        if (row.Off && counts[row.Off]) counts[row.Off].Off++;
+    });
+    let html = `<div class="page-title">Season Statistics</div>
+        <table class="stats-table"><thead><tr>
+            <th>Player</th>${POSITIONS.map(p=>`<th>${p}</th>`).join('')}<th>Off</th>
+        </tr></thead><tbody>`;
+    ALL_PLAYERS.forEach(p => {
+        html += `<tr><td>${p}</td>`;
+        POSITIONS.forEach(pos => html += `<td>${counts[p][pos]}</td>`);
+        html += `<td>${counts[p].Off}</td></tr>`;
+    });
+    html += '</tbody></table>';
+    document.getElementById('page-stats').innerHTML = html;
+}
+
+// ── RESET ─────────────────────────────────────────────────────────────────────
+async function doReset() {
+    if (!confirm('Reset entire rotation?')) return;
+    await fetch('/api/reset', {method:'POST'});
+    schedule = await fetch('/api/schedule').then(r => r.json());
+    renderRotation();
+    renderStats();
+}
+
+loadAll();
+</script>
+</body>
+</html>"""
+
+@app.route("/")
+def index():
+    return HTML
+
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=5000, debug=False)
