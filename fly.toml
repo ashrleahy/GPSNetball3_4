@@ -1,20 +1,28 @@
-app = "netballgps"
+app = "netball-pro"
 primary_region = "syd"
 
 [build]
 
+[env]
+  DATA_DIR = "/data"
+
 [http_service]
-  internal_port = 8080
+  internal_port = 8501
   force_https = true
   auto_stop_machines = true
   auto_start_machines = true
   min_machines_running = 0
 
-[[vm]]
-  memory = "512mb"
-  cpu_kind = "shared"
-  cpus = 1
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 25
+    soft_limit = 20
 
-[mounts]
+[[mounts]]
   source = "netball_data"
   destination = "/data"
+
+[[vm]]
+  memory = "256mb"
+  cpu_kind = "shared"
+  cpus = 1
