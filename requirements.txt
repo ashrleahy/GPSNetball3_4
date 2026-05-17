@@ -1,5 +1,2 @@
-streamlit
-pandas
-google-auth
-google-api-python-client
- 
+streamlit==1.35.0
+pandas==2.2.2
