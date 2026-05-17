@@ -38,7 +38,7 @@ FOLDER_ID = '1Hm9wBzP9XvTcz2i4t7Nz60TXRm-pEGee'
 FILE_NAME = "netball_rotation_backup.csv"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
-all_players = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
+all_players = ["Abbie", "Zara", "Judy", "Alexandra", "Kim", "Klara", "Saga", "Audrey"]
 positions = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
 all_slots = positions + ["Off"]
 
@@ -50,6 +50,7 @@ pos_colors = {
 
 # --- 2. DRIVE SYNC ---
 def get_drive_service():
+    # Try multiple possible locations for creds.json
     candidates = [
         os.path.join(BASE_DIR, 'creds.json'),
         os.path.join(os.getcwd(), 'creds.json'),
@@ -64,6 +65,7 @@ def get_drive_service():
     return build('drive', 'v3', credentials=creds)
 
 def get_file_id(service):
+    """Find the CSV file ID in the Drive folder, or None if not found."""
     query = "name = '" + FILE_NAME + "' and '" + FOLDER_ID + "' in parents and trashed = false"
     res = service.files().list(q=query, fields='files(id,name)').execute()
     files = res.get('files', [])
@@ -98,11 +100,18 @@ def load_from_drive():
         st.warning("Could not load from Drive: " + str(e))
         return None
 
-# --- 3. ROTATION ALGORITHM ---
+# --- 3. IMPROVED ROTATION ALGORITHM ---
 def run_auto_allocation(force=False):
+    """
+    Priority 1: No player sits off more than 1 quarter per game.
+    Priority 2: Continuity bias (same pos Q1->Q2, Q3->Q4; region switch Q2->Q3)
+                but balanced against season equity (everyone gets similar counts
+                in each position).
+    """
+    # Build schedule skeleton if needed
     if 'master_schedule' not in st.session_state or st.session_state.master_schedule.empty:
         dates = []
-        curr = date(2026, 5, 11)
+        curr = date(2026, 5, 11)  # CHANGED: start 11 May
         exclusions = [date(2026, 6, 8), date(2026, 7, 6), date(2026, 7, 13), date(2026, 9, 7)]
         while curr <= date(2026, 9, 21):
             if curr not in exclusions:
@@ -118,18 +127,21 @@ def run_auto_allocation(force=False):
 
     df = st.session_state.master_schedule
 
+    # When forcing, wipe all existing allocations so they're fully regenerated
     if force:
         for col in all_slots:
             df[col] = None
 
     avail = st.session_state.availability
 
+    # Region groupings for Q3 switch rule
     regs = {
         "GS": "Attack", "GA": "Attack", "WA": "Attack",
         "C": "Mid",
         "WD": "Defense", "GD": "Defense", "GK": "Defense"
     }
 
+    # Cumulative season counters
     pos_counts = {p: {pos: 0 for pos in positions} for p in all_players}
     off_counts = {p: 0 for p in all_players}
 
@@ -139,12 +151,18 @@ def run_auto_allocation(force=False):
         d_str = df[df['Week'] == w]['Date'].iloc[0]
         today_players = [p for p in all_players if avail.at[d_str, p]]
         n_avail = len(today_players)
+
+        # With 8 players and 7 positions: exactly 1 sits off each quarter.
+        # With fewer players, no-one sits off (shouldn't happen but handled).
         n_off_per_q = max(0, n_avail - 7)
+
+        # Track who has already sat off this game (Priority 1: max 1 off per game)
         sat_off_this_game = set()
 
         for q_idx in range(4):
             base_idx = (w - 1) * 4 + q_idx
 
+            # If not forcing and already allocated, just count it
             if not force and pd.notna(df.at[base_idx, 'GS']):
                 for pos in positions:
                     p = df.at[base_idx, pos]
@@ -156,10 +174,14 @@ def run_auto_allocation(force=False):
                     sat_off_this_game.add(off_p)
                 continue
 
+            # --- Decide who sits off this quarter ---
             if n_off_per_q > 0:
+                # Must not have sat off already this game
                 eligible_off = [p for p in today_players if p not in sat_off_this_game]
                 if not eligible_off:
-                    eligible_off = today_players
+                    eligible_off = today_players  # safety fallback
+
+                # Pick player(s) with fewest season off-counts to equalise
                 eligible_off_sorted = sorted(eligible_off, key=lambda p: off_counts[p])
                 off_now = eligible_off_sorted[:n_off_per_q]
             else:
@@ -177,7 +199,7 @@ def run_auto_allocation(force=False):
             REG_WEIGHT     = 60
             CHANGE_WEIGHT  = 120
 
-            prev_pos = {}
+            prev_pos = {}  # player → position in q_idx-1
             if q_idx > 0:
                 prev_idx = base_idx - 1
                 for pos in positions:
@@ -185,19 +207,19 @@ def run_auto_allocation(force=False):
                     if isinstance(p_prev, str):
                         prev_pos[p_prev] = pos
 
-            assigned = {}
+            assigned = {}   # pos → player
             remaining = list(on_now)
 
             def score(p, pos):
                 s = pos_counts[p][pos] * EQUITY_WEIGHT
                 if p in prev_pos:
                     last = prev_pos[p]
-                    if q_idx in [1, 3]:
+                    if q_idx in [1, 3]:  # Q2 or Q4 – continuity half
                         if last == pos:
                             s -= CONT_WEIGHT
                         elif regs.get(last) == regs.get(pos):
                             s -= REG_WEIGHT
-                    elif q_idx == 2:
+                    elif q_idx == 2:  # Q3 – want region change from Q2
                         if regs.get(last) == regs.get(pos):
                             s += CHANGE_WEIGHT
                 return s
@@ -215,6 +237,7 @@ def run_auto_allocation(force=False):
                 assigned[pos] = best
                 remaining.remove(best)
 
+            # Write back to dataframe
             for pos in positions:
                 p = assigned.get(pos, "N/A")
                 df.at[base_idx, pos] = p
@@ -224,20 +247,21 @@ def run_auto_allocation(force=False):
     st.session_state.master_schedule = df
 
 
-# --- 4. COMPUTE DEFAULT WEEK ---
+# --- 4. COMPUTE DEFAULT WEEK (current or next game) ---
 def get_default_week(date_list):
+    """Return the 1-based week index for today's game or the next upcoming game."""
     today = date.today()
     for i, d_str in enumerate(date_list):
         game_date = datetime.strptime(d_str, '%d %b %Y').date()
         if game_date >= today:
             return i + 1
-    return len(date_list)
+    return len(date_list)  # If season over, show last round
 
 
 # --- 5. INITIALIZATION ---
 if 'availability' not in st.session_state:
     dates = []
-    curr = date(2026, 5, 11)
+    curr = date(2026, 5, 11)  # CHANGED: start 11 May
     exclusions = [date(2026, 6, 8), date(2026, 7, 6), date(2026, 7, 13), date(2026, 9, 7)]
     while curr <= date(2026, 9, 21):
         if curr not in exclusions:
@@ -247,11 +271,13 @@ if 'availability' not in st.session_state:
 
 if 'master_schedule' not in st.session_state:
     loaded = load_from_drive()
+    # Discard stale Drive backup if it still contains the old May 4 start date
     if loaded is not None and '04 May 2026' in loaded['Date'].values:
         loaded = None
     st.session_state.master_schedule = loaded if loaded is not None else pd.DataFrame()
     run_auto_allocation()
 
+# Set default week based on today's date (only on first load)
 if 'round_selection' not in st.session_state:
     date_list = list(st.session_state.availability.index)
     st.session_state.round_selection = get_default_week(date_list)
@@ -265,10 +291,12 @@ with st.sidebar:
         update_drive()
         st.rerun()
 
-# PAGE 1: ROTATION
+# PAGE 1: ROTATION (FIXED HEADINGS)
 if page == "Rotation":
 
-    # Catch edit posted via query param from JS
+    # Catch edit posted via query param from JS.
+    # JS writes ?edit=week_pIdx_qIdx_newPos instead of postMessage
+    # (postMessage from components.html never returns a value to Python).
     qp = st.query_params
     if "edit" in qp:
         try:
@@ -307,6 +335,7 @@ if page == "Rotation":
             row["Qs"].append(pos)
         matrix_data.append(row)
 
+    # HTML GRID: Fixed Name Width (18%) and Quarter Width (20.5%)
     html_grid = f"""
     <div id="grid-root"></div>
     <script>
@@ -355,7 +384,7 @@ if page == "Rotation":
     
     components.html(html_grid, height=350)
 
-# PAGE 2: AVAILABILITY
+# PAGE 2: AVAILABILITY (RESTORED)
 elif page == "Availability":
     st.markdown("### Availability Planner")
     u = st.data_editor(st.session_state.availability, use_container_width=True)
@@ -365,10 +394,13 @@ elif page == "Availability":
         update_drive()
         st.rerun()
 
-# PAGE 3: STATS
+# PAGE 3: STATS (RESTORED)
 else:
     st.markdown("### Season Statistics")
+    # Bar chart for position counts
     melted = st.session_state.master_schedule.melt(id_vars=['Week'], value_vars=positions, value_name='Player')
     st.bar_chart(melted['Player'].value_counts())
+    
+    # Crosstab for detailed breakdown
     st.markdown("#### Position Breakdown by Player")
     st.dataframe(pd.crosstab(melted['Player'], melted.variable), use_container_width=True)
