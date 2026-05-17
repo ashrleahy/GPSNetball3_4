@@ -20,11 +20,22 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-# --- PERSISTENCE: plain JSON files on the Fly volume ---
-DATA_DIR = os.environ.get("DATA_DIR", "/data")
-os.makedirs(DATA_DIR, exist_ok=True)
+# --- PERSISTENCE ---
+DATA_DIR   = os.environ.get("DATA_DIR", "/data")
 SCHED_FILE = os.path.join(DATA_DIR, "schedule.json")
 AVAIL_FILE = os.path.join(DATA_DIR, "avail.json")
+
+# Ensure data dir exists and is writable - surface any problem immediately
+try:
+    os.makedirs(DATA_DIR, exist_ok=True)
+    test_file = os.path.join(DATA_DIR, ".write_test")
+    with open(test_file, "w") as f:
+        f.write("ok")
+    os.remove(test_file)
+    DATA_OK = True
+except Exception as e:
+    DATA_OK = False
+    DATA_ERR = str(e)
 
 def file_read(path):
     try:
@@ -145,7 +156,7 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
 
             remaining = list(on_now)
 
-            def spread(pos, _rem=remaining):
+            def spread(pos, _rem=list(remaining)):
                 if not _rem: return 0
                 sc = [score(p, pos) for p in _rem]
                 return max(sc) - min(sc)
@@ -166,13 +177,13 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
 
     return df
 
-# --- INIT: load from disk once per browser session ---
-if 'loaded' not in st.session_state:
-    st.session_state.loaded   = True
-    st.session_state.page     = "Rotation"
+# --- INIT: runs once per browser session ---
+if "loaded" not in st.session_state:
+    st.session_state.loaded = True
+    st.session_state.page   = "Rotation"
 
     saved_avail = file_read(AVAIL_FILE)
-    st.session_state.avail = saved_avail if saved_avail else default_avail()
+    st.session_state.avail  = saved_avail if saved_avail else default_avail()
 
     saved_sched = file_read(SCHED_FILE)
     if saved_sched:
@@ -182,14 +193,19 @@ if 'loaded' not in st.session_state:
         st.session_state.schedule = run_allocation_from(
             default_schedule(), st.session_state.avail, 1, pc, oc
         )
-        file_write(SCHED_FILE, st.session_state.schedule)
+        if DATA_OK:
+            file_write(SCHED_FILE, st.session_state.schedule)
 
     today = date.today()
     st.session_state.week = len(DATES)
     for i, d_str in enumerate(DATES):
-        if datetime.strptime(d_str, '%d %b %Y').date() >= today:
+        if datetime.strptime(d_str, "%d %b %Y").date() >= today:
             st.session_state.week = i + 1
             break
+
+# Show storage error prominently if volume isn't working
+if not DATA_OK:
+    st.error(f"⚠️ Storage not writable: {DATA_ERR} — changes will not persist. Check Fly volume mount.")
 
 # --- HANDLE EDIT FROM JS QUERY PARAM ---
 qp = st.query_params
@@ -213,7 +229,7 @@ if "edit" in qp:
         next_week = edit_week + 1
         if next_week <= len(DATES):
             pc, oc = build_counts(sched, next_week, 0)
-            sched = run_allocation_from(sched, st.session_state.avail, next_week, pc, oc)
+            sched  = run_allocation_from(sched, st.session_state.avail, next_week, pc, oc)
 
         st.session_state.schedule = sched
         st.session_state.week     = edit_week
@@ -323,7 +339,7 @@ elif page == "Availability":
     avail_df = pd.DataFrame(st.session_state.avail).T[ALL_PLAYERS]
     updated  = st.data_editor(avail_df, use_container_width=True)
     if st.button("Apply & Re-Balance"):
-        st.session_state.avail = updated.to_dict(orient='index')
+        st.session_state.avail = updated.to_dict(orient="index")
         file_write(AVAIL_FILE, st.session_state.avail)
         pc, oc = build_counts([])
         st.session_state.schedule = run_allocation_from(
