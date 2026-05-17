@@ -16,10 +16,10 @@ st.markdown("""
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
     td { border: 1px solid #ddd; height: 38px; padding: 0; }
+    div[data-testid="stHorizontalBlock"] { gap: 4px; }
     </style>
 """, unsafe_allow_html=True)
 
-# --- PERSISTENCE: read from disk every run, write on every change ---
 DATA_DIR   = os.environ.get("DATA_DIR", "/data")
 os.makedirs(DATA_DIR, exist_ok=True)
 SCHED_FILE = os.path.join(DATA_DIR, "schedule.json")
@@ -27,9 +27,9 @@ AVAIL_FILE = os.path.join(DATA_DIR, "avail.json")
 
 def file_read(path):
     try:
-        with open(path, "r") as f:
+        with open(path) as f:
             return json.load(f)
-    except Exception:
+    except:
         return None
 
 def file_write(path, data):
@@ -38,7 +38,6 @@ def file_write(path, data):
         f.flush()
         os.fsync(f.fileno())
 
-# --- CONSTANTS ---
 ALL_PLAYERS = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
 POSITIONS   = ["GS", "GA", "WA", "C", "WD", "GD", "GK"]
 ALL_SLOTS   = POSITIONS + ["Off"]
@@ -72,8 +71,7 @@ def default_schedule():
     for wi, d in enumerate(DATES):
         for q in range(4):
             row = {"week": wi+1, "date": d, "quarter": q+1}
-            for s in ALL_SLOTS:
-                row[s] = None
+            for s in ALL_SLOTS: row[s] = None
             rows.append(row)
     return rows
 
@@ -100,18 +98,14 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
     pc = {p: dict(pos_counts[p]) for p in ALL_PLAYERS}
     oc = dict(off_counts)
     EQUITY, CONT, REG, CHANGE = 100, 180, 60, 120
-
     for w in range(start_week, len(DATES)+1):
         d_str = DATES[w-1]
         today_players = [p for p in ALL_PLAYERS if avail.get(d_str, {}).get(p, True)]
         n_off = max(0, len(today_players) - 7)
         sat_off_game = set()
-
         for qi in range(4):
             idx = (w-1)*4 + qi
-            for s in ALL_SLOTS:
-                df[idx][s] = None
-
+            for s in ALL_SLOTS: df[idx][s] = None
             off_now = []
             if n_off > 0:
                 eligible = [p for p in today_players if p not in sat_off_game] or list(today_players)
@@ -121,16 +115,13 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
                 oc[p] += 1
                 sat_off_game.add(p)
             df[idx]["Off"] = off_now[0] if off_now else "N/A"
-
             on_now = [p for p in today_players if p not in off_now]
             prev_pos = {}
             if qi > 0:
                 prev = df[(w-1)*4 + qi-1]
                 for pos in POSITIONS:
                     pp = prev.get(pos)
-                    if pp and pp != "N/A":
-                        prev_pos[pp] = pos
-
+                    if pp and pp != "N/A": prev_pos[pp] = pos
             def score(p, pos, _qi=qi, _prev=prev_pos):
                 s = pc[p][pos] * EQUITY
                 if p in _prev:
@@ -141,31 +132,21 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
                     elif _qi == 2:
                         if REGIONS.get(last) == REGIONS.get(pos): s += CHANGE
                 return s
-
             remaining = list(on_now)
-
-            def spread(pos, _rem=list(remaining)):
-                if not _rem: return 0
-                sc = [score(p, pos) for p in _rem]
-                return max(sc) - min(sc)
-
-            pos_order = sorted(POSITIONS, key=spread, reverse=True)
+            pos_order = sorted(POSITIONS, key=lambda pos: (lambda sc: max(sc)-min(sc) if sc else 0)([score(p,pos) for p in remaining]), reverse=True)
             assigned = {}
             for pos in pos_order:
                 if not remaining: break
                 best = min(remaining, key=lambda p: score(p, pos))
                 assigned[pos] = best
                 remaining.remove(best)
-
             for pos in POSITIONS:
                 p = assigned.get(pos, "N/A")
                 df[idx][pos] = p
-                if p and p != "N/A" and p in pc:
-                    pc[p][pos] += 1
-
+                if p and p != "N/A" and p in pc: pc[p][pos] += 1
     return df
 
-# --- ALWAYS READ FROM DISK ON EVERY RUN ---
+# --- READ FROM DISK EVERY RUN ---
 avail    = file_read(AVAIL_FILE) or default_avail()
 schedule = file_read(SCHED_FILE)
 if not schedule:
@@ -173,7 +154,6 @@ if not schedule:
     schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
     file_write(SCHED_FILE, schedule)
 
-# Page and week live in session state (UI only, not data)
 if "page" not in st.session_state:
     st.session_state.page = "Rotation"
 if "week" not in st.session_state:
@@ -184,15 +164,15 @@ if "week" not in st.session_state:
             st.session_state.week = i + 1
             break
 
-# --- HANDLE EDIT FROM JS ---
-qp = st.query_params
-if "edit" in qp:
+# --- HANDLE EDIT VIA SESSION STATE (no query params) ---
+if "pending_edit" in st.session_state and st.session_state.pending_edit:
+    edit = st.session_state.pending_edit
+    st.session_state.pending_edit = None
     try:
-        parts     = qp["edit"].split("_")
-        edit_week = int(parts[0])
-        p_idx     = int(parts[1])
-        q_idx     = int(parts[2])
-        new_pos   = parts[3]
+        edit_week = edit["week"]
+        p_idx     = edit["p_idx"]
+        q_idx     = edit["q_idx"]
+        new_pos   = edit["new_pos"]
         p_name    = ALL_PLAYERS[p_idx]
         m_idx     = (edit_week - 1) * 4 + q_idx
 
@@ -209,11 +189,8 @@ if "edit" in qp:
 
         file_write(SCHED_FILE, schedule)
         st.session_state.week = edit_week
-        st.session_state.page = "Rotation"
     except Exception as e:
-        st.toast(f"Edit error: {e}")
-    st.query_params.clear()
-    st.rerun()
+        st.error(f"Edit error: {e}")
 
 # --- NAV ---
 st.markdown("### 🏐 Netball Pro")
@@ -254,6 +231,24 @@ if page == "Rotation":
             pos  = next((c for c in ALL_SLOTS if qrow.get(c) == p), "Off")
             row["Qs"].append(pos)
         matrix_data.append(row)
+
+    # Use st.components with postMessage back to Streamlit via a hidden text_input
+    edit_placeholder = st.empty()
+    edit_val = edit_placeholder.text_input("edit_signal", value="", label_visibility="collapsed", key="edit_signal")
+
+    if edit_val and edit_val != st.session_state.get("last_edit_signal", ""):
+        st.session_state.last_edit_signal = edit_val
+        try:
+            parts = edit_val.split("_")
+            st.session_state.pending_edit = {
+                "week":    int(parts[0]),
+                "p_idx":   int(parts[1]),
+                "q_idx":   int(parts[2]),
+                "new_pos": parts[3]
+            }
+        except:
+            pass
+        st.rerun()
 
     html_grid = f"""
     <div id="grid-root"></div>
@@ -296,9 +291,14 @@ if page == "Rotation":
         if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
         matrix[pIdx].Qs[qIdx] = val;
         render();
-        const url = new URL(window.parent.location.href);
-        url.searchParams.set('edit', week + '_' + pIdx + '_' + qIdx + '_' + val);
-        window.parent.location.href = url.toString();
+        // Write to hidden Streamlit text input instead of query param
+        const signal = week + '_' + pIdx + '_' + qIdx + '_' + val;
+        const input = window.parent.document.querySelector('input[data-testid="stTextInput"]');
+        if (input) {{
+            const nativeInputValueSetter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            nativeInputValueSetter.call(input, signal);
+            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+        }}
     }}
     render();
     </script>
