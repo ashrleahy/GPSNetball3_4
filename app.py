@@ -2,13 +2,21 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
 import streamlit.components.v1 as components
-import os, json
+import os, json, time
 
 # --- CONFIG ---
 st.set_page_config(page_title="Netball Pro", page_icon="🏐", layout="wide")
 
+# Force light theme via injected style
 st.markdown("""
     <style>
+    :root, [data-theme="dark"], [data-theme="light"] {
+        color-scheme: light !important;
+    }
+    html, body, [class*="css"] {
+        background-color: #ffffff !important;
+        color: #262730 !important;
+    }
     [data-testid="stSidebar"] { display: none !important; }
     [data-testid="collapsedControl"] { display: none !important; }
     #MainMenu { visibility: hidden; }
@@ -17,6 +25,7 @@ st.markdown("""
     table { width: 100%; border-collapse: collapse; table-layout: fixed; }
     th { font-size: 10px; color: #444; padding: 4px; border: 1px solid #ddd; background: #f8f9fa; }
     td { border: 1px solid #ddd; height: 38px; padding: 0; }
+    .debug-box { background: #fff3cd; border: 1px solid #ffc107; padding: 8px; font-size: 11px; font-family: monospace; margin-bottom: 8px; white-space: pre-wrap; word-break: break-all; }
     </style>
 """, unsafe_allow_html=True)
 
@@ -24,31 +33,47 @@ st.markdown("""
 DATA_DIR   = os.environ.get("DATA_DIR", "/data")
 SCHED_FILE = os.path.join(DATA_DIR, "schedule.json")
 AVAIL_FILE = os.path.join(DATA_DIR, "avail.json")
+DEBUG_FILE = os.path.join(DATA_DIR, "debug.log")
 
-# Ensure data dir exists and is writable - surface any problem immediately
-try:
-    os.makedirs(DATA_DIR, exist_ok=True)
-    test_file = os.path.join(DATA_DIR, ".write_test")
-    with open(test_file, "w") as f:
-        f.write("ok")
-    os.remove(test_file)
-    DATA_OK = True
-except Exception as e:
-    DATA_OK = False
-    DATA_ERR = str(e)
+def log(msg):
+    ts = datetime.now().strftime("%H:%M:%S")
+    line = f"[{ts}] {msg}\n"
+    try:
+        with open(DEBUG_FILE, "a") as f:
+            f.write(line)
+    except:
+        pass
 
 def file_read(path):
     try:
         with open(path, "r") as f:
-            return json.load(f)
-    except Exception:
+            data = json.load(f)
+        log(f"READ OK {path} size={os.path.getsize(path)}")
+        return data
+    except Exception as e:
+        log(f"READ FAIL {path} err={e}")
         return None
 
 def file_write(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f)
-        f.flush()
-        os.fsync(f.fileno())
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as f:
+            json.dump(data, f)
+            f.flush()
+            os.fsync(f.fileno())
+        size = os.path.getsize(path)
+        log(f"WRITE OK {path} size={size}")
+    except Exception as e:
+        log(f"WRITE FAIL {path} err={e}")
+        st.error(f"Write failed: {e}")
+
+def read_debug_log():
+    try:
+        with open(DEBUG_FILE, "r") as f:
+            lines = f.readlines()
+        return "".join(lines[-30:])  # last 30 lines
+    except:
+        return "No log yet"
 
 # --- CONSTANTS ---
 ALL_PLAYERS = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
@@ -177,24 +202,29 @@ def run_allocation_from(schedule, avail, start_week, pos_counts, off_counts):
 
     return df
 
-# --- INIT: runs once per browser session ---
+# --- INIT ---
+log(f"=== APP RUN session_id={id(st.session_state)} loaded={'loaded' in st.session_state} ===")
+
 if "loaded" not in st.session_state:
     st.session_state.loaded = True
     st.session_state.page   = "Rotation"
+    log(f"DATA_DIR={DATA_DIR} exists={os.path.exists(DATA_DIR)} writable={os.access(DATA_DIR, os.W_OK)}")
+    log(f"SCHED_FILE exists={os.path.exists(SCHED_FILE)}")
 
     saved_avail = file_read(AVAIL_FILE)
-    st.session_state.avail  = saved_avail if saved_avail else default_avail()
+    st.session_state.avail = saved_avail if saved_avail else default_avail()
 
     saved_sched = file_read(SCHED_FILE)
     if saved_sched:
         st.session_state.schedule = saved_sched
+        log(f"Loaded schedule rows={len(saved_sched)} W1Q1_GS={saved_sched[0].get('GS')}")
     else:
+        log("No saved schedule - generating fresh")
         pc, oc = build_counts([])
         st.session_state.schedule = run_allocation_from(
             default_schedule(), st.session_state.avail, 1, pc, oc
         )
-        if DATA_OK:
-            file_write(SCHED_FILE, st.session_state.schedule)
+        file_write(SCHED_FILE, st.session_state.schedule)
 
     today = date.today()
     st.session_state.week = len(DATES)
@@ -203,13 +233,10 @@ if "loaded" not in st.session_state:
             st.session_state.week = i + 1
             break
 
-# Show storage error prominently if volume isn't working
-if not DATA_OK:
-    st.error(f"⚠️ Storage not writable: {DATA_ERR} — changes will not persist. Check Fly volume mount.")
-
-# --- HANDLE EDIT FROM JS QUERY PARAM ---
+# --- HANDLE EDIT ---
 qp = st.query_params
 if "edit" in qp:
+    log(f"EDIT param received: {qp['edit']}")
     try:
         parts     = qp["edit"].split("_")
         edit_week = int(parts[0])
@@ -226,6 +253,8 @@ if "edit" in qp:
         if old_pos:
             sched[m_idx][old_pos] = displaced
 
+        log(f"Edit: {p_name} {old_pos}->{new_pos} week={edit_week} q={q_idx}")
+
         next_week = edit_week + 1
         if next_week <= len(DATES):
             pc, oc = build_counts(sched, next_week, 0)
@@ -235,7 +264,9 @@ if "edit" in qp:
         st.session_state.week     = edit_week
         st.session_state.page     = "Rotation"
         file_write(SCHED_FILE, st.session_state.schedule)
+        log(f"After write: file_exists={os.path.exists(SCHED_FILE)} size={os.path.getsize(SCHED_FILE) if os.path.exists(SCHED_FILE) else 0}")
     except Exception as e:
+        log(f"EDIT ERROR: {e}")
         st.toast(f"Edit error: {e}")
     st.query_params.clear()
     st.rerun()
@@ -265,6 +296,20 @@ with c4:
         st.rerun()
 
 page = st.session_state.page
+
+# --- DEBUG PANEL ---
+with st.expander("🔍 Debug (tap to expand)"):
+    st.code(read_debug_log(), language=None)
+    col1, col2 = st.columns(2)
+    with col1:
+        st.write("DATA_DIR:", DATA_DIR)
+        st.write("exists:", os.path.exists(DATA_DIR))
+        st.write("writable:", os.access(DATA_DIR, os.W_OK))
+    with col2:
+        st.write("schedule.json:", os.path.exists(SCHED_FILE))
+        if os.path.exists(SCHED_FILE):
+            st.write("size:", os.path.getsize(SCHED_FILE), "bytes")
+            st.write("modified:", datetime.fromtimestamp(os.path.getmtime(SCHED_FILE)).strftime("%H:%M:%S"))
 
 # --- ROTATION PAGE ---
 if page == "Rotation":
@@ -333,7 +378,6 @@ if page == "Rotation":
     """
     components.html(html_grid, height=350)
 
-# --- AVAILABILITY PAGE ---
 elif page == "Availability":
     st.markdown("### Availability Planner")
     avail_df = pd.DataFrame(st.session_state.avail).T[ALL_PLAYERS]
@@ -348,7 +392,6 @@ elif page == "Availability":
         file_write(SCHED_FILE, st.session_state.schedule)
         st.rerun()
 
-# --- STATS PAGE ---
 elif page == "Stats":
     st.markdown("### Season Statistics")
     counts = {p: {pos: 0 for pos in POSITIONS} | {"Off": 0} for p in ALL_PLAYERS}
