@@ -163,6 +163,38 @@ if "week" not in st.session_state:
             st.session_state.week = i + 1
             break
 
+# ── Handle save via query param — just the final positions, tiny payload ───────
+qp = st.query_params
+if "save" in qp:
+    try:
+        # Format: "week|p0q0pos,p0q1pos,p0q2pos,p0q3pos|p1q0pos,..." 
+        parts     = qp["save"].split("|")
+        save_week = int(parts[0])
+        for pi, player_part in enumerate(parts[1:]):
+            qpositions = player_part.split(",")
+            for qi, pos in enumerate(qpositions):
+                m_idx = (save_week - 1) * 4 + qi
+                # Remove this player from wherever they are
+                p_name = ALL_PLAYERS[pi]
+                for s in ALL_SLOTS:
+                    if schedule[m_idx].get(s) == p_name:
+                        schedule[m_idx][s] = None
+                # Place them in new position
+                schedule[m_idx][pos] = p_name
+
+        # Rebalance future weeks
+        next_week = save_week + 1
+        if next_week <= len(DATES):
+            pc, oc   = build_counts(schedule, next_week, 0)
+            schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
+
+        file_write(SCHED_FILE, schedule)
+        st.session_state.week = save_week
+    except Exception as e:
+        st.error(f"Save failed: {e}")
+    st.query_params.clear()
+    st.rerun()
+
 # ── Nav ────────────────────────────────────────────────────────────────────────
 mtime = os.path.getmtime(SCHED_FILE) if os.path.exists(SCHED_FILE) else 0
 st.caption(f"💾 {datetime.fromtimestamp(mtime).strftime('%H:%M:%S') if mtime else 'never'}")
@@ -192,9 +224,7 @@ if page == "Rotation":
     st.markdown(f"### {DATES[w-1]}")
     st.slider("Match Week", 1, len(DATES), key="week", label_visibility="collapsed")
 
-    week_rows = [r for r in schedule if r["week"] == w]
-
-    # Build matrix for the grid
+    week_rows   = [r for r in schedule if r["week"] == w]
     matrix_data = []
     for p in ALL_PLAYERS:
         row = {"name": p, "Qs": []}
@@ -203,12 +233,6 @@ if page == "Rotation":
             row["Qs"].append(pos)
         matrix_data.append(row)
 
-    # Pending edits stored as list of {pIdx, qIdx, newPos} — applied on Save
-    if f"pending_{w}" not in st.session_state:
-        st.session_state[f"pending_{w}"] = []
-
-    # The grid: identical HTML/JS to original, but send() stores edits locally
-    # and updates a hidden textarea instead of redirecting
     html_grid = f"""
     <style>
     table {{ width:100%; border-collapse:collapse; font-family:sans-serif; table-layout:fixed; }}
@@ -216,14 +240,15 @@ if page == "Rotation":
     td {{ border:1px solid #ddd; height:38px; padding:0; }}
     select {{ width:100%; height:100%; border:none; background:transparent; font-size:10px;
               font-weight:bold; text-align:center; appearance:none; cursor:pointer; }}
-    #save-btn {{ margin-top:8px; width:100%; padding:8px; background:#ff4b4b; color:white;
-                 border:none; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer; }}
-    #save-btn:hover {{ background:#cc0000; }}
-    #status {{ font-size:11px; color:#666; margin-top:4px; text-align:center; }}
+    #save-btn {{
+        margin-top:6px; width:100%; padding:8px; background:#ff4b4b; color:white;
+        border:none; border-radius:4px; font-size:13px; font-weight:bold; cursor:pointer;
+    }}
+    #status {{ font-size:11px; color:#888; text-align:center; margin-top:3px; min-height:16px; }}
     </style>
 
     <div id="grid-root"></div>
-    <button id="save-btn" onclick="saveChanges()">💾 Save Changes</button>
+    <button id="save-btn" onclick="saveChanges()">💾 Save &amp; Rebalance</button>
     <div id="status"></div>
 
     <script>
@@ -232,7 +257,7 @@ if page == "Rotation":
     const players = {json.dumps(ALL_PLAYERS)};
     const week    = {w};
     let matrix    = {json.dumps(matrix_data)};
-    let pending   = [];
+    let dirty     = false;
 
     function render() {{
         let h = `<table>
@@ -244,10 +269,9 @@ if page == "Rotation":
                 <th style="width:20.5%">Q4</th>
             </tr></thead><tbody>`;
         matrix.forEach((row, pIdx) => {{
-            h += `<tr>
-                <td style="font-size:10px;font-weight:bold;padding-left:3px;background:#fff;
-                           overflow:hidden;white-space:nowrap;text-overflow:ellipsis">
-                    ${{row.name}}</td>`;
+            h += `<tr><td style="font-size:10px;font-weight:bold;padding-left:3px;
+                       background:#fff;overflow:hidden;white-space:nowrap;
+                       text-overflow:ellipsis">${{row.name}}</td>`;
             row.Qs.forEach((pos, qIdx) => {{
                 const bg   = colors[pos] || '#F5F5F5';
                 const opts = slots.map(s =>
@@ -262,70 +286,37 @@ if page == "Rotation":
         h += `</tbody></table>`;
         document.getElementById('grid-root').innerHTML = h;
         document.getElementById('status').textContent =
-            pending.length > 0 ? `${{pending.length}} unsaved change(s)` : '';
+            dirty ? '● Unsaved changes' : '';
     }}
 
     function onEdit(pIdx, qIdx, newPos) {{
         const oldPos = matrix[pIdx].Qs[qIdx];
         if (oldPos === newPos) return;
-        // Swap with whoever has newPos
+        // Swap with whoever currently has newPos in this quarter
         const displacedIdx = matrix.findIndex(r => r.Qs[qIdx] === newPos);
         if (displacedIdx !== -1) matrix[displacedIdx].Qs[qIdx] = oldPos;
         matrix[pIdx].Qs[qIdx] = newPos;
-        // Track pending
-        pending.push({{pIdx, qIdx, newPos, oldPos}});
+        dirty = true;
         render();
     }}
 
     function saveChanges() {{
-        if (pending.length === 0) return;
+        if (!dirty) return;
+        // Encode as: "week|p0q0,p0q1,p0q2,p0q3|p1q0,..." — tiny string
+        const parts = [week];
+        matrix.forEach(row => parts.push(row.Qs.join(',')));
+        const payload = parts.join('|');
+        const url = new URL(window.parent.location.href);
+        url.searchParams.set('save', payload);
         document.getElementById('save-btn').textContent = 'Saving...';
         document.getElementById('save-btn').disabled = true;
-
-        // Build full matrix state to send
-        const payload = matrix.map(row => ({{name: row.name, Qs: row.Qs}}));
-
-        // Send to Streamlit via query param with full grid state
-        const data = encodeURIComponent(JSON.stringify({{week: week, matrix: payload}}));
-        const url  = new URL(window.parent.location.href);
-        url.searchParams.set('save', data);
         window.parent.location.href = url.toString();
     }}
 
     render();
     </script>
     """
-    components.html(html_grid, height=420)
-
-    # Handle save from query param
-    qp = st.query_params
-    if "save" in qp:
-        try:
-            payload   = json.loads(qp["save"])
-            save_week = payload["week"]
-            matrix    = payload["matrix"]
-
-            # Write matrix back to schedule
-            for qi in range(4):
-                m_idx = (save_week - 1) * 4 + qi
-                for s in ALL_SLOTS:
-                    schedule[m_idx][s] = None
-                for row in matrix:
-                    pos = row["Qs"][qi]
-                    schedule[m_idx][pos] = row["name"]
-
-            # Rebalance future weeks
-            next_week = save_week + 1
-            if next_week <= len(DATES):
-                pc, oc   = build_counts(schedule, next_week, 0)
-                schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
-
-            file_write(SCHED_FILE, schedule)
-            st.session_state.week = save_week
-        except Exception as e:
-            st.error(f"Save failed: {e}")
-        st.query_params.clear()
-        st.rerun()
+    components.html(html_grid, height=430)
 
 # ── Availability ───────────────────────────────────────────────────────────────
 elif page == "Availability":
