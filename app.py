@@ -45,10 +45,10 @@ def file_read(path):
         return None
 
 def file_write(path, data):
-    tmp = path + ".tmp"
-    with open(tmp, "w") as f:
+    with open(path, "w") as f:
         json.dump(data, f)
-    os.replace(tmp, path)
+        f.flush()
+        os.fsync(f.fileno())
 
 # --- CONSTANTS ---
 ALL_PLAYERS = ["Abbie", "Alexandra", "Audrey", "Judy", "Kim", "Klara", "Saga", "Zara"]
