@@ -138,11 +138,22 @@ def get_schedule():
     return s
 
 def get_default_week():
+    """First week whose date is today-or-later. This is the hard floor —
+    nothing at or before this week is ever allowed to change."""
     today = date.today()
     for i, d_str in enumerate(DATES):
         if datetime.strptime(d_str, "%d %b %Y").date() >= today:
             return i + 1
     return len(DATES)
+
+def enforce_floor(schedule, original, floor_week):
+    """Belt-and-braces guarantee: whatever else happened above, force every
+    row for a week before floor_week back to what it was in `original`
+    before we write anything to disk."""
+    for i, row in enumerate(schedule):
+        if row["week"] < floor_week:
+            schedule[i] = original[i]
+    return schedule
 
 # ── API endpoints ──────────────────────────────────────────────────────────────
 
@@ -150,16 +161,27 @@ def get_default_week():
 def api_schedule():
     return jsonify(get_schedule())
 
+@app.route("/api/current_week")
+def api_current_week():
+    return jsonify({"current_week": get_default_week()})
+
 @app.route("/api/save", methods=["POST"])
 def api_save():
     try:
-        payload  = request.get_json()
+        payload   = request.get_json()
         save_week = payload["week"]
-        matrix   = payload["matrix"]
-        schedule = get_schedule()
-        avail    = file_read(AVAIL_FILE) or default_avail()
+        matrix    = payload["matrix"]
+        schedule  = get_schedule()
+        avail     = file_read(AVAIL_FILE) or default_avail()
+        current_week = get_default_week()
 
-        # Apply matrix to THIS week only — never touch past weeks
+        # Hard rule: you cannot edit a week that has already happened.
+        if save_week < current_week:
+            return jsonify({"ok": False, "error": "That week is in the past and is locked."}), 400
+
+        original = [dict(r) for r in schedule]
+
+        # Apply matrix to THIS week only
         for qi in range(4):
             m_idx = (save_week - 1) * 4 + qi
             for s in ALL_SLOTS:
@@ -170,12 +192,14 @@ def api_save():
                     schedule[m_idx][pos] = row["name"]
 
         # Rebalance FUTURE weeks only (save_week+1 onward)
-        # Past weeks (1..save_week-1) are never touched
         next_week = save_week + 1
         if next_week <= len(DATES):
-            # Count everything up to end of save_week as the equity baseline
             pc, oc = build_counts(schedule, next_week, 0)
             schedule = run_allocation_from(schedule, avail, next_week, pc, oc)
+
+        # Safety net: no matter what the logic above did, weeks before
+        # today's current_week are forced back to their original values.
+        schedule = enforce_floor(schedule, original, current_week)
 
         file_write(SCHED_FILE, schedule)
         return jsonify({"ok": True})
@@ -184,9 +208,20 @@ def api_save():
 
 @app.route("/api/reset", methods=["POST"])
 def api_reset():
+    original = get_schedule()
     avail = file_read(AVAIL_FILE) or default_avail()
-    pc, oc = build_counts([])
-    schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
+    current_week = get_default_week()
+
+    # Build a blank slate, but weeks before today stay exactly as they were.
+    blank = default_schedule()
+    for i, row in enumerate(blank):
+        if row["week"] < current_week:
+            blank[i] = original[i]
+
+    pc, oc = build_counts(blank, current_week, 0)
+    schedule = run_allocation_from(blank, avail, current_week, pc, oc)
+    schedule = enforce_floor(schedule, original, current_week)
+
     file_write(SCHED_FILE, schedule)
     return jsonify({"ok": True})
 
@@ -198,8 +233,17 @@ def api_avail():
 def api_save_avail():
     avail = request.get_json()
     file_write(AVAIL_FILE, avail)
-    pc, oc = build_counts([])
-    schedule = run_allocation_from(default_schedule(), avail, 1, pc, oc)
+
+    original = get_schedule()
+    current_week = get_default_week()
+
+    # Only rebalance from today's week onward — never touch the past.
+    pc, oc = build_counts(original, current_week, 0)
+    schedule = run_allocation_from(original, avail, current_week, pc, oc)
+
+    # Safety net, same as everywhere else.
+    schedule = enforce_floor(schedule, original, current_week)
+
     file_write(SCHED_FILE, schedule)
     return jsonify({"ok": True})
 
@@ -232,10 +276,12 @@ td { border: 1px solid #ddd; height: 38px; padding: 0; }
              overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 select { width: 100%; height: 100%; border: none; background: transparent; font-size: 10px;
          font-weight: bold; text-align: center; appearance: none; cursor: pointer; }
+select:disabled { color: #999; cursor: not-allowed; }
 .save-btn { width: 100%; margin-top: 6px; padding: 8px; background: #ff4b4b; color: #fff;
             border: none; border-radius: 4px; font-size: 13px; font-weight: bold; cursor: pointer; }
 .save-btn:disabled { background: #ccc; }
 .status { font-size: 11px; color: #888; text-align: center; margin-top: 3px; min-height: 16px; }
+.locked-banner { font-size: 11px; color: #c00; text-align: center; margin-bottom: 6px; }
 .mtime { font-size: 10px; color: #aaa; text-align: right; margin-bottom: 4px; }
 .avail-table { width: 100%; border-collapse: collapse; font-size: 10px; }
 .avail-table th, .avail-table td { border: 1px solid #ddd; padding: 4px; text-align: center; }
@@ -273,17 +319,20 @@ const DATES       = """ + json.dumps(DATES) + """;
 let schedule = [];
 let avail    = {};
 let currentWeek = """ + str(get_default_week()) + """;
+let CURRENT_WEEK = currentWeek; // today's week — anything before this is locked
 let currentPage = 'rotation';
 let matrix = [];
 let dirty = false;
 
 async function loadAll() {
-    const [s, a] = await Promise.all([
+    const [s, a, cw] = await Promise.all([
         fetch('/api/schedule').then(r => r.json()),
-        fetch('/api/avail').then(r => r.json())
+        fetch('/api/avail').then(r => r.json()),
+        fetch('/api/current_week').then(r => r.json())
     ]);
     schedule = s;
     avail    = a;
+    CURRENT_WEEK = cw.current_week;
     renderRotation();
     renderAvailability();
     renderStats();
@@ -312,15 +361,16 @@ function buildMatrix(w) {
 function renderRotation() {
     matrix = buildMatrix(currentWeek);
     dirty  = false;
-    const mtime = ''; // server doesn't expose this but that's fine
+    const isPast = currentWeek < CURRENT_WEEK;
     let html = `
         <div class="page-title">${DATES[currentWeek-1]}</div>
         <div class="slider-wrap">
             <input type="range" min="1" max="${DATES.length}" value="${currentWeek}"
                    oninput="changeWeek(parseInt(this.value))"/>
         </div>
+        ${isPast ? '<div class="locked-banner">🔒 This week is in the past and is read-only</div>' : ''}
         <div id="grid-table"></div>
-        <button class="save-btn" id="save-btn" onclick="saveChanges()">💾 Save &amp; Rebalance</button>
+        <button class="save-btn" id="save-btn" onclick="saveChanges()" ${isPast ? 'disabled' : ''}>💾 Save &amp; Rebalance</button>
         <div class="status" id="status"></div>`;
     document.getElementById('page-rotation').innerHTML = html;
     renderTable();
@@ -336,6 +386,7 @@ function changeWeek(w) {
 }
 
 function onEdit(pIdx, qIdx, newPos) {
+    if (currentWeek < CURRENT_WEEK) return; // locked, ignore
     const oldPos = matrix[pIdx].Qs[qIdx];
     if (oldPos === newPos) return;
     // Swap with whoever has newPos in this quarter
@@ -348,6 +399,7 @@ function onEdit(pIdx, qIdx, newPos) {
 }
 
 function renderTable() {
+    const isPast = currentWeek < CURRENT_WEEK;
     let html = `<table>
         <thead><tr>
             <th style="width:18%">NAME</th>
@@ -364,7 +416,7 @@ function renderTable() {
                 `<option value="${s}" ${s===pos?'selected':''}>${s}</option>`
             ).join('');
             html += `<td style="background:${bg}">
-                <select onchange="onEdit(${pIdx},${qIdx},this.value)">${opts}</select>
+                <select ${isPast ? 'disabled' : ''} onchange="onEdit(${pIdx},${qIdx},this.value)">${opts}</select>
             </td>`;
         });
         html += '</tr>';
@@ -375,7 +427,7 @@ function renderTable() {
 }
 
 async function saveChanges() {
-    if (!dirty) return;
+    if (!dirty || currentWeek < CURRENT_WEEK) return;
     const btn = document.getElementById('save-btn');
     btn.disabled = true;
     btn.textContent = 'Saving...';
@@ -410,14 +462,17 @@ async function saveChanges() {
 // ── AVAILABILITY ──────────────────────────────────────────────────────────────
 function renderAvailability() {
     let html = `<div class="page-title">Availability Planner</div>
+        <div class="locked-banner" style="color:#888">Dates before today are locked and cannot be changed</div>
         <table class="avail-table"><thead><tr>
             <th>Date</th>${ALL_PLAYERS.map(p => `<th>${p.slice(0,4)}</th>`).join('')}
         </tr></thead><tbody>`;
-    DATES.forEach(d => {
+    DATES.forEach((d, i) => {
+        const w = i + 1;
+        const isPast = w < CURRENT_WEEK;
         html += `<tr><td>${d}</td>`;
         ALL_PLAYERS.forEach(p => {
             const chk = avail[d] && avail[d][p] ? 'checked' : '';
-            html += `<td><input type="checkbox" ${chk} onchange="availChange('${d}','${p}',this.checked)"/></td>`;
+            html += `<td><input type="checkbox" ${chk} ${isPast ? 'disabled' : ''} onchange="availChange('${d}','${p}',this.checked)"/></td>`;
         });
         html += '</tr>';
     });
@@ -467,7 +522,7 @@ function renderStats() {
 
 // ── RESET ─────────────────────────────────────────────────────────────────────
 async function doReset() {
-    if (!confirm('Reset entire rotation?')) return;
+    if (!confirm('Reset all FUTURE weeks? Past weeks (before today) will not be touched.')) return;
     await fetch('/api/reset', {method:'POST'});
     schedule = await fetch('/api/schedule').then(r => r.json());
     renderRotation();
